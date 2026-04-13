@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.json
+!adapter_project/config.json
+!adapter_project/tests/*.json
+logs/
+screenshots/
+downloads/
+.pio/
+.pytest_cache/
+.vscode/

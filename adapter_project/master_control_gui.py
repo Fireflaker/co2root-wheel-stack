@@ -11,6 +11,7 @@ import ctypes
 import datetime
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -28,11 +29,14 @@ try:
 except Exception:  # pragma: no cover
     serial = None
 
+from vjoy_state import save_input_state
+
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 MUTEX_NAME = "Global\\Co2Root_MasterControlGUI"
 LOG_DIR = ROOT / "logs" / "master_gui"
+VJOY_INTERFACE_DLL = Path(r"C:\Program Files\vJoy\x64\vJoyInterface.dll")
 
 
 class MasterLock:
@@ -56,11 +60,32 @@ class MasterLock:
 
 def ps_kill_conflicts() -> str:
     cmd = (
-        "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
-        "Where-Object { $_.CommandLine -match 'adapter_project[/\\\\]adapter_main.py|"
-        "wheel_sim_bridge.py|elmo_ffb_bridge.py' } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "
-        "\"STOPPED $($_.ProcessId)\" } | Out-String"
+        "$pythonCmdPattern = 'adapter_project[/\\\\]adapter_main\\.py|wheel_sim_bridge\\.py|"
+        "elmo_ffb_bridge\\.py|verify_adapter_control\\.py|spin_and_ffb_verify\\.py|"
+        "direct_rotation_sweep\\.py|il_pulse_verify\\.py|tc_diagnostics\\.py|"
+        "torque_path_sweep\\.py|motion_ref_discovery\\.py|um_tc_discovery\\.py|"
+        "wheel_poller_1khz(?:_fast)?\\.py|encoder_roundtrip_loop(?:_v2)?\\.py|"
+        "start_wheel_bridge\\.py|local_screen_setup[/\\\\]wheel_spin_demo\\.py'; "
+        "$powershellCmdPattern = 'run_wheel_demo\\.ps1|run_adapter_with_demo\\.ps1|"
+        "motor_cleanup_and_release\\.ps1|wheel_ops\\.ps1|start_adapter\\.ps1|start_master_gui\\.ps1'; "
+        "$titlePattern = 'Elmo Application Studio|\\bEAS\\b|Composer'; "
+        "$killed = New-Object System.Collections.Generic.List[string]; "
+        "Get-CimInstance Win32_Process -Filter \"name='python.exe' OR name='pythonw.exe'\" | "
+        "Where-Object { $_.CommandLine -match $pythonCmdPattern } | "
+        "ForEach-Object { "
+        "  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed.Add(\"python PID=$($_.ProcessId)\") } catch {} "
+        "}; "
+        "Get-CimInstance Win32_Process -Filter \"name='powershell.exe' OR name='pwsh.exe'\" | "
+        "Where-Object { $_.CommandLine -match $powershellCmdPattern -and $_.ProcessId -ne $PID } | "
+        "ForEach-Object { "
+        "  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed.Add(\"powershell PID=$($_.ProcessId)\") } catch {} "
+        "}; "
+        "Get-Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.MainWindowTitle -match $titlePattern -or $_.ProcessName -match 'StudioManager|Composer|EAS' } | "
+        "ForEach-Object { "
+        "  try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; $killed.Add(\"$($_.ProcessName) PID=$($_.Id)\") } catch {} "
+        "}; "
+        "if ($killed.Count -eq 0) { 'No conflicting bridge process found.' } else { 'STOPPED ' + ($killed -join ', ') }"
     )
     res = subprocess.run(
         ["powershell", "-NoProfile", "-Command", cmd],
@@ -75,7 +100,7 @@ def start_simhub() -> str:
     simhub_exe = r"C:\Program Files (x86)\SimHub\SimHubWPF.exe"
     if not Path(simhub_exe).exists():
         return "SimHub executable not found in default path."
-    subprocess.run(["powershell", "-NoProfile", "-Command", f'Start-Process "{simhub_exe}"'], timeout=5)
+    os.startfile(simhub_exe)
     return "SimHub start triggered."
 
 
@@ -85,7 +110,7 @@ def start_lfs() -> str:
     )
     if not Path(lfs_link).exists():
         return "LFS shortcut not found."
-    subprocess.run(["powershell", "-NoProfile", "-Command", f'Start-Process "{lfs_link}"'], timeout=5)
+    os.startfile(lfs_link)
     return "LFS start triggered."
 
 
@@ -93,14 +118,38 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Co2Root Wheel Master Control")
-        self.root.geometry("980x670")
+        self.root.geometry("1180x820")
         self.proc: subprocess.Popen[str] | None = None
         self.proc_name = ""
         self.cfg = self._load_cfg()
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.session_log = LOG_DIR / f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.throttle_var = tk.DoubleVar(value=0.0)
+        self.brake_var = tk.DoubleVar(value=0.0)
+        self.cmd_mode_var = tk.StringVar(value=str(self.cfg.get("elmo_command_mode", "pr")))
+        self.ffb_strength_var = tk.StringVar(value=str(self.cfg.get("ffb_strength", 1.0)))
+        self.max_current_a_var = tk.StringVar(value=str(self.cfg.get("max_current_a", 0.0)))
+        self.motor_current_utilization_var = tk.StringVar(value=str(self.cfg.get("motor_current_utilization", 0.5)))
+        self.min_current_a_var = tk.StringVar(value=str(self.cfg.get("min_current_a", 0.1)))
+        self.current_cmd_scale_var = tk.StringVar(value=str(self.cfg.get("current_cmd_scale", 1000.0)))
+        self.max_il_step_var = tk.StringVar(value=str(self.cfg.get("max_il_step_per_loop", 100)))
+        self.max_pr_per_loop_var = tk.StringVar(value=str(self.cfg.get("max_pr_per_loop", 220)))
+        self.max_pr_step_var = tk.StringVar(value=str(self.cfg.get("max_pr_step_per_loop", 16)))
+        self.max_tc_var = tk.StringVar(value=str(self.cfg.get("max_tc", 300)))
+        self.max_tc_step_var = tk.StringVar(value=str(self.cfg.get("max_tc_step_per_loop", 12)))
+        self.ffb_deadband_var = tk.StringVar(value=str(self.cfg.get("ffb_deadband", 50)))
+        self.ffb_input_max_var = tk.StringVar(value=str(self.cfg.get("ffb_input_max", 10000)))
+        self.vjoy_device_id_var = tk.StringVar(value=str(self.cfg.get("vjoy_device_id", 1)))
+        self.wheel_lock_deg_var = tk.StringVar(value=str(self.cfg.get("wheel_lock_deg", 540.0)))
+        self.inject_fallback_var = tk.BooleanVar(value=bool(self.cfg.get("ffb_fallback_to_inject", True)))
+        self.fallback_after_var = tk.StringVar(value=str(self.cfg.get("ffb_fallback_after_s", 1.0)))
+        self.idle_release_var = tk.BooleanVar(value=bool(self.cfg.get("release_motor_on_idle_ffb", False)))
+        self.test_current_var = tk.StringVar(value="280")
+        self.spin_jv_var = tk.StringVar(value="1500")
+        self.counts_per_rev_var = tk.StringVar(value="131072")
 
         self._build_ui()
+        self._write_vjoy_pedal_state(log_change=False)
         self._heartbeat()
 
     def _load_cfg(self) -> dict[str, Any]:
@@ -110,6 +159,9 @@ class App:
 
     def _save_cfg(self) -> None:
         CONFIG_PATH.write_text(json.dumps(self.cfg, indent=4), encoding="ascii")
+
+    def _is_direct_vjoy_ffb(self) -> bool:
+        return self.src_var.get().strip().lower() == "vjoy_ffb"
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self.root)
@@ -124,7 +176,7 @@ class App:
 
         self.src_var = tk.StringVar(value=str(self.cfg.get("sim_source", "websocket")))
         ttk.Label(cfg, text="Sim source").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        ttk.Combobox(cfg, textvariable=self.src_var, values=["websocket", "http", "serial", "inject"], width=14, state="readonly").grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Combobox(cfg, textvariable=self.src_var, values=["websocket", "http", "serial", "inject", "vjoy_ffb"], width=14, state="readonly").grid(row=0, column=1, padx=6, pady=6, sticky="w")
 
         self.auto_on_var = tk.BooleanVar(value=bool(self.cfg.get("auto_motor_on", False)))
         ttk.Checkbutton(cfg, text="auto_motor_on", variable=self.auto_on_var).grid(row=0, column=2, padx=6, pady=6, sticky="w")
@@ -139,6 +191,52 @@ class App:
         self.px_skip_var = tk.StringVar(value=str(self.cfg.get("px_poll_every_loops", 1)))
         ttk.Label(cfg, text="px_poll_every_loops").grid(row=1, column=2, padx=6, pady=6, sticky="w")
         ttk.Entry(cfg, textvariable=self.px_skip_var, width=10).grid(row=1, column=3, padx=6, pady=6, sticky="w")
+
+        tuning = ttk.LabelFrame(self.root, text="FFB And Output Mapping")
+        tuning.pack(fill=tk.X, padx=10, pady=6)
+
+        ttk.Label(tuning, text="elmo_command_mode").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Combobox(tuning, textvariable=self.cmd_mode_var, values=["pr", "il", "tc"], width=10, state="readonly").grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="ffb_strength").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.ffb_strength_var, width=10).grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="ffb_deadband").grid(row=0, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.ffb_deadband_var, width=10).grid(row=0, column=5, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="ffb_input_max").grid(row=0, column=6, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.ffb_input_max_var, width=10).grid(row=0, column=7, padx=6, pady=6, sticky="w")
+
+        ttk.Label(tuning, text="max_current_a").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_current_a_var, width=10).grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="motor_current_utilization").grid(row=1, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.motor_current_utilization_var, width=10).grid(row=1, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="min_current_a").grid(row=1, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.min_current_a_var, width=10).grid(row=1, column=5, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="current_cmd_scale").grid(row=1, column=6, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.current_cmd_scale_var, width=10).grid(row=1, column=7, padx=6, pady=6, sticky="w")
+
+        ttk.Label(tuning, text="max_il_step_per_loop").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_il_step_var, width=10).grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="max_pr_per_loop").grid(row=2, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_pr_per_loop_var, width=10).grid(row=2, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="max_pr_step_per_loop").grid(row=2, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_pr_step_var, width=10).grid(row=2, column=5, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="wheel_lock_deg").grid(row=2, column=6, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.wheel_lock_deg_var, width=10).grid(row=2, column=7, padx=6, pady=6, sticky="w")
+
+        ttk.Label(tuning, text="max_tc").grid(row=3, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_tc_var, width=10).grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="max_tc_step_per_loop").grid(row=3, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.max_tc_step_var, width=10).grid(row=3, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="vjoy_device_id").grid(row=3, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.vjoy_device_id_var, width=10).grid(row=3, column=5, padx=6, pady=6, sticky="w")
+        ttk.Label(tuning, text="ffb_fallback_after_s").grid(row=3, column=6, padx=6, pady=6, sticky="w")
+        ttk.Entry(tuning, textvariable=self.fallback_after_var, width=10).grid(row=3, column=7, padx=6, pady=6, sticky="w")
+
+        ttk.Checkbutton(tuning, text="ffb_fallback_to_inject", variable=self.inject_fallback_var).grid(row=4, column=0, columnspan=2, padx=6, pady=6, sticky="w")
+        ttk.Checkbutton(tuning, text="release_motor_on_idle_ffb", variable=self.idle_release_var).grid(row=4, column=2, columnspan=2, padx=6, pady=6, sticky="w")
+        ttk.Label(
+            tuning,
+            text="Direct game FFB uses sim_source=vjoy_ffb. IL mode uses current-related fields; PR mode uses motion-reference fallback. TC remains hardware-dependent.",
+        ).grid(row=4, column=4, columnspan=4, padx=6, pady=6, sticky="w")
 
         btns = ttk.LabelFrame(self.root, text="Master Actions")
         btns.pack(fill=tk.X, padx=10, pady=6)
@@ -159,6 +257,49 @@ class App:
         ttk.Button(ext, text="Start SimHub", command=lambda: self._log(start_simhub())).grid(row=0, column=0, padx=6, pady=6)
         ttk.Button(ext, text="Start LFS", command=lambda: self._log(start_lfs())).grid(row=0, column=1, padx=6, pady=6)
 
+        auto = ttk.LabelFrame(self.root, text="Autonomous Tests")
+        auto.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Label(auto, text="test_current").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(auto, textvariable=self.test_current_var, width=10).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(auto, text="spin_jv").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(auto, textvariable=self.spin_jv_var, width=10).grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(auto, text="counts_per_rev").grid(row=0, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(auto, textvariable=self.counts_per_rev_var, width=10).grid(row=0, column=5, padx=6, pady=6, sticky="w")
+        ttk.Button(auto, text="Auto Spin Verify", command=self.auto_spin_verify).grid(row=1, column=0, padx=6, pady=6)
+        ttk.Button(auto, text="Rotate -1 Rev", command=lambda: self.rotate_one_rev(-1)).grid(row=1, column=1, padx=6, pady=6)
+        ttk.Button(auto, text="Rotate +1 Rev", command=lambda: self.rotate_one_rev(1)).grid(row=1, column=2, padx=6, pady=6)
+        ttk.Label(
+            auto,
+            text="These tests drive the wheel directly, read encoder PX, then send ST/TC=0/MO=0.",
+        ).grid(row=1, column=3, columnspan=3, padx=6, pady=6, sticky="w")
+
+        pedals = ttk.LabelFrame(self.root, text="vJoy Pedals")
+        pedals.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Label(pedals, text="Throttle").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Scale(
+            pedals,
+            from_=0,
+            to=100,
+            variable=self.throttle_var,
+            orient=tk.HORIZONTAL,
+            command=self._on_pedal_slider_change,
+        ).grid(row=0, column=1, padx=6, pady=6, sticky="we")
+        ttk.Label(pedals, text="Brake").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        ttk.Scale(
+            pedals,
+            from_=0,
+            to=100,
+            variable=self.brake_var,
+            orient=tk.HORIZONTAL,
+            command=self._on_pedal_slider_change,
+        ).grid(row=1, column=1, padx=6, pady=6, sticky="we")
+        self.throttle_label = ttk.Label(pedals, text="0%")
+        self.throttle_label.grid(row=0, column=2, padx=6, pady=6, sticky="e")
+        self.brake_label = ttk.Label(pedals, text="0%")
+        self.brake_label.grid(row=1, column=2, padx=6, pady=6, sticky="e")
+        ttk.Button(pedals, text="Reset Pedals", command=self.reset_pedals).grid(row=0, column=3, rowspan=2, padx=6, pady=6)
+        pedals.columnconfigure(1, weight=1)
+
         safety = ttk.LabelFrame(self.root, text="Panic")
         safety.pack(fill=tk.X, padx=10, pady=6)
         ttk.Button(safety, text="PANIC STOP", command=self.panic_stop).pack(side=tk.LEFT, padx=8, pady=8)
@@ -172,7 +313,26 @@ class App:
         logf.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 8))
         self.log = tk.Text(logf, height=16)
         self.log.pack(fill=tk.BOTH, expand=True)
-        self._log("Master GUI ready. Use Kill Conflicts -> Probe Drive -> Start Safe vJoy/Start Adapter.")
+        self._log("Master GUI ready. Start Safe vJoy is steering-only. Start Adapter is the motor/FFB path.")
+
+    def _write_vjoy_pedal_state(self, log_change: bool = True) -> None:
+        throttle = float(self.throttle_var.get()) / 100.0
+        brake = float(self.brake_var.get()) / 100.0
+        save_input_state(throttle, brake)
+        self.throttle_label.config(text=f"{int(round(self.throttle_var.get()))}%")
+        self.brake_label.config(text=f"{int(round(self.brake_var.get()))}%")
+        if log_change:
+            self._log(
+                f"vJoy pedals updated: throttle={int(round(self.throttle_var.get()))}% brake={int(round(self.brake_var.get()))}%"
+            )
+
+    def _on_pedal_slider_change(self, _value: str) -> None:
+        self._write_vjoy_pedal_state(log_change=False)
+
+    def reset_pedals(self) -> None:
+        self.throttle_var.set(0.0)
+        self.brake_var.set(0.0)
+        self._write_vjoy_pedal_state()
 
     def _log(self, msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -189,6 +349,12 @@ class App:
 
         try:
             self.root.after(0, append)
+        except Exception:
+            pass
+
+    def _set_status(self, value: str) -> None:
+        try:
+            self.root.after(0, lambda: self.status_var.set(value))
         except Exception:
             pass
 
@@ -213,6 +379,88 @@ class App:
         self._elmo_log(f"{cmd} => {resp or '<no-response>'}")
         return resp
 
+    def _parse_last_int(self, text: str) -> int | None:
+        nums = re.findall(r"-?\d+", text)
+        return int(nums[-1]) if nums else None
+
+    def _query_int(self, sp: Any, cmd: str, read_wait_s: float = 0.08) -> int | None:
+        return self._parse_last_int(self._elmo_exchange(sp, cmd, read_wait_s=read_wait_s))
+
+    def _wait_until_stable(
+        self,
+        sp: Any,
+        expected_abs_delta: int,
+        timeout_s: float = 8.0,
+        stable_window_s: float = 0.3,
+        poll_s: float = 0.06,
+    ) -> tuple[int | None, int | None, int | None]:
+        px0 = self._query_int(sp, "PX", read_wait_s=0.03)
+        if px0 is None:
+            return None, None, None
+
+        t0 = time.time()
+        reached = False
+        stable_since: float | None = None
+        last_px = px0
+
+        while time.time() - t0 < timeout_s:
+            px = self._query_int(sp, "PX", read_wait_s=0.03)
+            if px is None:
+                time.sleep(poll_s)
+                continue
+
+            delta = px - px0
+            if abs(delta) >= max(1, int(expected_abs_delta * 0.90)):
+                reached = True
+
+            if px == last_px:
+                if stable_since is None:
+                    stable_since = time.time()
+            else:
+                stable_since = None
+                last_px = px
+
+            if reached and stable_since is not None and (time.time() - stable_since) >= stable_window_s:
+                return px0, px, delta
+
+            time.sleep(poll_s)
+
+        px_end = self._query_int(sp, "PX", read_wait_s=0.03)
+        return px0, px_end, (None if px_end is None else px_end - px0)
+
+    def _run_autonomous_serial_task(self, name: str, worker: callable) -> None:
+        if serial is None:
+            self._log("pyserial unavailable.")
+            return
+
+        self.stop_managed(release_after_stop=True)
+        self.kill_conflicts()
+        if not self._preflight_elmo_port(auto_cleanup=True):
+            self._log(f"{name} aborted: COM preflight did not succeed.")
+            return
+
+        def run() -> None:
+            self._set_status(f"Running: {name}")
+            try:
+                port = str(self.cfg.get("elmo_port", "COM13"))
+                baud = int(self.cfg.get("elmo_baud", 115200))
+                with serial.Serial(port, baud, timeout=0.25) as sp:
+                    time.sleep(0.12)
+                    try:
+                        sp.reset_input_buffer()
+                        sp.reset_output_buffer()
+                    except Exception:
+                        pass
+                    worker(sp)
+            except Exception as exc:
+                self._log(f"{name} failed: {exc}")
+                self._elmo_log(f"{name} failed: {exc}")
+            finally:
+                self._run_release_sequence()
+                self._set_status("Idle")
+
+        threading.Thread(target=run, daemon=True).start()
+
     def save_config(self) -> None:
         try:
             self.cfg["sim_source"] = self.src_var.get().strip()
@@ -220,8 +468,32 @@ class App:
             self.cfg["motor_off_on_exit"] = bool(self.off_on_exit_var.get())
             self.cfg["loop_hz"] = int(self.loop_var.get().strip())
             self.cfg["px_poll_every_loops"] = int(self.px_skip_var.get().strip())
+            self.cfg["elmo_command_mode"] = self.cmd_mode_var.get().strip().lower()
+            self.cfg["ffb_strength"] = float(self.ffb_strength_var.get().strip())
+            self.cfg["max_current_a"] = float(self.max_current_a_var.get().strip())
+            self.cfg["motor_current_utilization"] = float(self.motor_current_utilization_var.get().strip())
+            self.cfg["min_current_a"] = float(self.min_current_a_var.get().strip())
+            self.cfg["current_cmd_scale"] = float(self.current_cmd_scale_var.get().strip())
+            self.cfg["max_il_step_per_loop"] = int(self.max_il_step_var.get().strip())
+            self.cfg["max_pr_per_loop"] = int(self.max_pr_per_loop_var.get().strip())
+            self.cfg["max_pr_step_per_loop"] = int(self.max_pr_step_var.get().strip())
+            self.cfg["max_tc"] = int(self.max_tc_var.get().strip())
+            self.cfg["max_tc_step_per_loop"] = int(self.max_tc_step_var.get().strip())
+            self.cfg["ffb_deadband"] = int(self.ffb_deadband_var.get().strip())
+            self.cfg["ffb_input_max"] = int(self.ffb_input_max_var.get().strip())
+            self.cfg["vjoy_device_id"] = int(self.vjoy_device_id_var.get().strip())
+            self.cfg["wheel_lock_deg"] = float(self.wheel_lock_deg_var.get().strip())
+            self.cfg["ffb_fallback_to_inject"] = bool(self.inject_fallback_var.get())
+            self.cfg["ffb_fallback_after_s"] = float(self.fallback_after_var.get().strip())
+            self.cfg["release_motor_on_idle_ffb"] = bool(self.idle_release_var.get())
             self._save_cfg()
-            self._log("Config saved.")
+            self._log(
+                "Config saved. "
+                f"sim_source={self.cfg['sim_source']} "
+                f"mode={self.cfg['elmo_command_mode']} "
+                f"ffb_strength={self.cfg['ffb_strength']} "
+                f"max_current_a={self.cfg['max_current_a']}"
+            )
         except Exception as exc:
             messagebox.showerror("Save failed", str(exc))
 
@@ -248,28 +520,76 @@ class App:
         except Exception:
             return False
 
+    def _preflight_elmo_port(self, auto_cleanup: bool = True) -> bool:
+        if serial is None:
+            self._log("pyserial unavailable.")
+            return False
+
+        port = str(self.cfg.get("elmo_port", "COM13"))
+        baud = int(self.cfg.get("elmo_baud", 115200))
+
+        try:
+            with serial.Serial(port, baud, timeout=0.1):
+                pass
+            return True
+        except Exception as exc:
+            self._log(f"Preflight {port}@{baud} failed: {exc}")
+            if not auto_cleanup:
+                return False
+
+            self._log(f"Attempting automatic conflict cleanup for {port}.")
+            self.kill_conflicts()
+            time.sleep(0.5)
+
+            try:
+                with serial.Serial(port, baud, timeout=0.1):
+                    pass
+                self._log(f"Preflight {port}@{baud} succeeded after cleanup.")
+                return True
+            except Exception as retry_exc:
+                self._log(f"Preflight still failed after cleanup: {retry_exc}")
+                return False
+
     def health_check(self) -> None:
         port = str(self.cfg.get("elmo_port", "COM13"))
         baud = int(self.cfg.get("elmo_baud", 115200))
         ws_url = str(self.cfg.get("sim_ws_url", "ws://127.0.0.1:8888"))
+        direct_vjoy = str(self.cfg.get("sim_source", "")).lower().strip() == "vjoy_ffb"
         simhub_port_ok = self._is_port_open("127.0.0.1", 8888)
         com_ok = self._can_open_serial(port, baud)
-        self._log(f"HEALTH simhub_port_8888={'OK' if simhub_port_ok else 'DOWN'}")
+        if direct_vjoy:
+            self._log(f"HEALTH vjoy_interface_dll={'OK' if VJOY_INTERFACE_DLL.exists() else 'MISSING'} path={VJOY_INTERFACE_DLL}")
+            self._log("HEALTH simhub=NOT_REQUIRED for sim_source=vjoy_ffb")
+        else:
+            self._log(f"HEALTH simhub_port_8888={'OK' if simhub_port_ok else 'DOWN'}")
         self._log(f"HEALTH {port}@{baud}={'OK' if com_ok else 'BUSY/DOWN'}")
         self._log(f"HEALTH sim_source={self.cfg.get('sim_source')} sim_ws_url={ws_url}")
+        self._log(
+            "HEALTH output_mode="
+            f"{self.cfg.get('elmo_command_mode')} "
+            f"ffb_strength={self.cfg.get('ffb_strength')} "
+            f"max_current_a={self.cfg.get('max_current_a')} "
+            f"motor_current_utilization={self.cfg.get('motor_current_utilization')}"
+        )
 
     def one_click_safe_bringup(self) -> None:
         def run() -> None:
-            self._log("One-click safe bring-up starting.")
-            self.save_config()
-            self.kill_conflicts()
-            self.health_check()
-            self.release_motor()
-            time.sleep(0.2)
-            self._log(start_simhub())
-            time.sleep(0.2)
-            self._log(start_lfs())
-            self._log("One-click safe bring-up complete. Choose Start Safe vJoy first, then Start Adapter when ready.")
+            try:
+                self._log("One-click safe bring-up starting.")
+                self.save_config()
+                self.kill_conflicts()
+                self.health_check()
+                self.release_motor()
+                time.sleep(0.2)
+                if self._is_direct_vjoy_ffb():
+                    self._log("Skipping SimHub start because sim_source=vjoy_ffb uses direct game FFB via vJoy.")
+                else:
+                    self._log(start_simhub())
+                time.sleep(0.2)
+                self._log(start_lfs())
+                self._log("One-click safe bring-up complete. Start Safe vJoy for steering-only validation, then Start Adapter for motor/FFB.")
+            except Exception as exc:
+                self._log(f"One-click safe bring-up failed: {exc}")
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -303,27 +623,38 @@ class App:
         if serial is None:
             self._log("pyserial unavailable.")
             return
-        port = str(self.cfg.get("elmo_port", "COM13"))
-        baud = int(self.cfg.get("elmo_baud", 115200))
-
         def run_release():
-            try:
-                with serial.Serial(port, baud, timeout=0.25) as sp:
-                    time.sleep(0.1)
-                    for cmd in ("ST", "TC=0", "MO=0", "MO"):
-                        resp = self._elmo_exchange(sp, cmd, read_wait_s=0.12)
-                        self._log(f"{cmd} => {resp or '<no-response>'}")
-                self._log("Motor release sequence done.")
-                self._elmo_log("Release sequence done.")
-            except Exception as exc:
-                self._log(f"Release failed: {exc}")
-                self._elmo_log(f"Release failed: {exc}")
+            self._run_release_sequence()
 
         threading.Thread(target=run_release, daemon=True).start()
 
+    def _run_release_sequence(self) -> bool:
+        if serial is None:
+            self._log("pyserial unavailable.")
+            return False
+
+        port = str(self.cfg.get("elmo_port", "COM13"))
+        baud = int(self.cfg.get("elmo_baud", 115200))
+        try:
+            with serial.Serial(port, baud, timeout=0.25) as sp:
+                time.sleep(0.1)
+                for cmd in ("ST", "TC=0", "MO=0", "MO"):
+                    resp = self._elmo_exchange(sp, cmd, read_wait_s=0.12)
+                    self._log(f"{cmd} => {resp or '<no-response>'}")
+            self._log("Motor release sequence done. Shaft should be disabled.")
+            self._elmo_log("Release sequence done.")
+            return True
+        except Exception as exc:
+            self._log(f"Release failed: {exc}")
+            self._elmo_log(f"Release failed: {exc}")
+            return False
+
     def _start_managed(self, args: list[str], name: str) -> None:
-        self.stop_managed()
+        self.stop_managed(release_after_stop=True)
         self.kill_conflicts()
+        if not self._preflight_elmo_port(auto_cleanup=True):
+            self._log(f"Start {name} aborted: COM preflight did not succeed.")
+            return
         try:
             self.proc = subprocess.Popen(
                 args,
@@ -352,20 +683,135 @@ class App:
 
     def start_adapter(self) -> None:
         self.save_config()
+        sim_source = str(self.cfg.get("sim_source", "")).lower().strip()
+        command_mode = str(self.cfg.get("elmo_command_mode", "pr")).lower().strip()
         if str(self.cfg.get("sim_source", "")).lower() == "websocket" and not self._is_port_open("127.0.0.1", 8888):
             self._log("WARN sim_source=websocket but SimHub port 8888 is not reachable.")
+        if sim_source != "vjoy_ffb":
+            self._log(
+                f"WARN Start Adapter is using sim_source={sim_source}. If you expect game FFB via the vJoy wheel device, switch sim_source to vjoy_ffb."
+            )
+        else:
+            self._log(
+                "Starting adapter for direct game FFB via vJoy. "
+                f"mode={command_mode} device={self.cfg.get('vjoy_device_id')} SimHub not required."
+            )
+        if command_mode == "pr":
+            self._log("INFO elmo_command_mode=pr uses motion-reference fallback. Current-limit fields are saved but do not directly drive output in PR mode.")
+        elif command_mode == "il":
+            self._log(
+                "INFO elmo_command_mode=il uses current mapping. "
+                f"max_current_a={self.cfg.get('max_current_a')} "
+                f"motor_current_utilization={self.cfg.get('motor_current_utilization')} "
+                f"min_current_a={self.cfg.get('min_current_a')}"
+            )
+        elif command_mode == "tc":
+            self._log("WARN elmo_command_mode=tc is exposed for completeness, but this hardware has previously rejected TC commands.")
+        if bool(self.cfg.get("release_motor_on_idle_ffb", False)):
+            self._log(
+                "WARN release_motor_on_idle_ffb=true. If game FFB drops near zero, the adapter will motor-off after the idle timeout and holding torque will fall away."
+            )
         python_exe = str((ROOT.parent / ".venv" / "Scripts" / "python.exe").resolve())
         if not Path(python_exe).exists():
             python_exe = sys.executable
         self._start_managed([python_exe, str((ROOT / "adapter_main.py").resolve())], "adapter_main")
 
     def start_safe_vjoy(self) -> None:
+        self._log("Starting Safe vJoy: steering on vJoy X, GUI throttle on vJoy Z, GUI brake on vJoy RZ, motor force disabled by design.")
         python_exe = str((ROOT.parent / ".venv" / "Scripts" / "python.exe").resolve())
         if not Path(python_exe).exists():
             python_exe = sys.executable
         self._start_managed([python_exe, str((ROOT / "wheel_sim_bridge.py").resolve()), "--mode", "vjoy"], "wheel_sim_bridge_safe")
 
-    def stop_managed(self) -> None:
+    def auto_spin_verify(self) -> None:
+        try:
+            tc = int(self.test_current_var.get().strip())
+            jv = int(self.spin_jv_var.get().strip())
+        except Exception as exc:
+            messagebox.showerror("Invalid test settings", str(exc))
+            return
+
+        def worker(sp: Any) -> None:
+            selected_um = None
+            for candidate in (2, 5, 4):
+                self._elmo_exchange(sp, "MO=0", read_wait_s=0.04)
+                self._elmo_exchange(sp, f"UM={candidate}", read_wait_s=0.04)
+                um = self._query_int(sp, "UM", read_wait_s=0.04)
+                if um == candidate:
+                    selected_um = candidate
+                    break
+
+            if selected_um is None:
+                raise RuntimeError("Could not select a supported UM for autonomous spin verify.")
+
+            self._log(f"Auto Spin Verify: selected UM={selected_um}, test_current={tc}, spin_jv={jv}")
+            self._elmo_exchange(sp, "MO=1", read_wait_s=0.05)
+
+            px_before = self._query_int(sp, "PX", read_wait_s=0.03)
+            self._elmo_exchange(sp, f"TC={tc}", read_wait_s=0.0)
+            time.sleep(0.35)
+            self._elmo_exchange(sp, f"TC={-tc}", read_wait_s=0.0)
+            time.sleep(0.35)
+            self._elmo_exchange(sp, "TC=0", read_wait_s=0.0)
+            time.sleep(0.08)
+            px_after_torque = self._query_int(sp, "PX", read_wait_s=0.03)
+            torque_delta = None if px_before is None or px_after_torque is None else abs(px_after_torque - px_before)
+            self._log(f"Auto Spin Verify torque pulse: px_before={px_before} px_after={px_after_torque} delta={torque_delta}")
+
+            px_before_spin = self._query_int(sp, "PX", read_wait_s=0.03)
+            self._elmo_exchange(sp, f"JV={jv}", read_wait_s=0.03)
+            self._elmo_exchange(sp, "BG", read_wait_s=0.03)
+            time.sleep(2.0)
+            px_mid = self._query_int(sp, "PX", read_wait_s=0.03)
+            self._elmo_exchange(sp, "ST", read_wait_s=0.03)
+            self._elmo_exchange(sp, "JV=0", read_wait_s=0.03)
+            self._elmo_exchange(sp, "BG", read_wait_s=0.03)
+            time.sleep(0.15)
+            px_after_spin = self._query_int(sp, "PX", read_wait_s=0.03)
+            spin_delta = None if px_before_spin is None or px_mid is None else abs(px_mid - px_before_spin)
+            rotation_ok = bool((spin_delta is not None and spin_delta > 100) or (torque_delta is not None and torque_delta > 100))
+            self._log(
+                "Auto Spin Verify result: "
+                f"px_before={px_before_spin} px_mid={px_mid} px_after={px_after_spin} spin_delta={spin_delta} rotation_ok={rotation_ok}"
+            )
+
+        self._run_autonomous_serial_task("auto_spin_verify", worker)
+
+    def rotate_one_rev(self, direction: int) -> None:
+        try:
+            counts_per_rev = int(self.counts_per_rev_var.get().strip())
+        except Exception as exc:
+            messagebox.showerror("Invalid test settings", str(exc))
+            return
+
+        cmd_counts = counts_per_rev if direction >= 0 else -counts_per_rev
+        name = "rotate_plus_one_rev" if direction >= 0 else "rotate_minus_one_rev"
+
+        def worker(sp: Any) -> None:
+            self._log(f"{name}: starting autonomous move with cmd_counts={cmd_counts}")
+            self._elmo_exchange(sp, "ST", read_wait_s=0.04)
+            self._elmo_exchange(sp, "TC=0", read_wait_s=0.02)
+            self._elmo_exchange(sp, "MO=0", read_wait_s=0.04)
+            self._elmo_exchange(sp, "UM=5", read_wait_s=0.05)
+            self._elmo_exchange(sp, "RM=1", read_wait_s=0.05)
+            self._elmo_exchange(sp, "MO=1", read_wait_s=0.05)
+
+            mo = self._query_int(sp, "MO", read_wait_s=0.04)
+            um = self._query_int(sp, "UM", read_wait_s=0.04)
+            self._log(f"{name}: drive state MO={mo} UM={um}")
+
+            self._elmo_exchange(sp, f"PR={cmd_counts}", read_wait_s=0.01)
+            self._elmo_exchange(sp, "BG", read_wait_s=0.01)
+            px0, px1, delta = self._wait_until_stable(sp, expected_abs_delta=counts_per_rev)
+            ok = (delta is not None) and (abs(abs(delta) - counts_per_rev) <= int(counts_per_rev * 0.15))
+            self._log(
+                f"{name}: px0={px0} px1={px1} delta={delta} target={counts_per_rev} ok={ok}"
+            )
+
+        self._run_autonomous_serial_task(name, worker)
+
+    def stop_managed(self, release_after_stop: bool = True) -> None:
+        stopped = False
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -376,29 +822,42 @@ class App:
                 if self.proc.poll() is None:
                     self.proc.kill()
                 self._log(f"Stopped managed process: {self.proc_name}")
+                stopped = True
             except Exception as exc:
                 self._log(f"Stop managed failed: {exc}")
+        elif self.proc_name:
+            stopped = True
+
+        if release_after_stop:
+            if self._run_release_sequence():
+                if stopped:
+                    self._log("Managed stop completed and motor released.")
+                else:
+                    self._log("No managed process was running; motor release sequence still sent.")
+
         self.proc = None
         self.proc_name = ""
         self.status_var.set("Idle")
+        self.reset_pedals()
 
     def on_close(self) -> None:
-        self.stop_managed()
+        self.stop_managed(release_after_stop=bool(self.cfg.get("motor_off_on_exit", True)))
         if bool(self.cfg.get("motor_off_on_exit", True)):
-            self.release_motor()
             self._log("Window close: motor_off_on_exit enabled, release sequence sent.")
         self.root.destroy()
 
     def panic_stop(self) -> None:
-        self.stop_managed()
+        self.stop_managed(release_after_stop=True)
         self.kill_conflicts()
-        self.release_motor()
         self._log("PANIC STOP completed.")
 
     def _heartbeat(self) -> None:
         if self.proc and self.proc.poll() is not None:
             code = self.proc.returncode
             self._log(f"Managed process exited with code {code}")
+            if bool(self.cfg.get("motor_off_on_exit", True)):
+                threading.Thread(target=self._run_release_sequence, daemon=True).start()
+                self._log("Managed process exit detected; release sequence sent.")
             self.proc = None
             self.proc_name = ""
             self.status_var.set("Idle")

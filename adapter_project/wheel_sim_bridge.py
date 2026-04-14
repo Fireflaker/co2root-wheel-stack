@@ -21,6 +21,8 @@ from typing import Callable
 
 import serial
 
+from vjoy_state import load_input_state, pedal_to_vjoy_axis, released_pedal_vjoy_axis
+
 try:
     import pyvjoy
     VJOY_AVAILABLE = True
@@ -92,7 +94,7 @@ class vJoyBridge:
     def _neutralize_non_steering_axes(self) -> None:
         # Keep steering-type axes centered and pedal-style axes released.
         center = 16384
-        released = 0
+        released = released_pedal_vjoy_axis()
         self._set_axis_safe(pyvjoy.HID_USAGE_X, center)
         self._set_axis_safe(pyvjoy.HID_USAGE_Y, center)
         self._set_axis_safe(pyvjoy.HID_USAGE_RX, center)
@@ -108,6 +110,12 @@ class vJoyBridge:
         axis_value = int(16384 + (steering * 16384))
         axis_value = max(0, min(32767, axis_value))
         self._set_axis_safe(pyvjoy.HID_USAGE_X, axis_value)
+
+        pedal_state = load_input_state()
+        self._set_axis_safe(pyvjoy.HID_USAGE_Z, pedal_to_vjoy_axis(pedal_state["throttle"]))
+        self._set_axis_safe(pyvjoy.HID_USAGE_RZ, pedal_to_vjoy_axis(pedal_state["brake"]))
+        self._set_axis_safe(pyvjoy.HID_USAGE_SL0, released_pedal_vjoy_axis())
+        self._set_axis_safe(pyvjoy.HID_USAGE_SL1, released_pedal_vjoy_axis())
     
     def close(self) -> None:
         """Reset joystick."""

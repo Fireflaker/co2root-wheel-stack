@@ -1,0 +1,3 @@
+TargetPath=C:\LFS\LFS.exe
+Arguments=
+WorkingDirectory=C:\LFS

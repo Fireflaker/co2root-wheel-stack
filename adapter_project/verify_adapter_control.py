@@ -32,6 +32,7 @@ def main() -> int:
     p.add_argument("--tc", type=int, default=140)
     p.add_argument("--hold-ms", type=int, default=250)
     p.add_argument("--json-out", default="")
+    p.add_argument("--leave-enabled", action="store_true")
     args = p.parse_args()
 
     result = {
@@ -73,6 +74,11 @@ def main() -> int:
 
         px_after = parse_last_int(send(ser, "PX"))
         result["px_after"] = px_after
+
+        if not args.leave_enabled:
+            send(ser, "TC=0", wait=0.0)
+            send(ser, "ST", wait=0.03)
+            send(ser, "MO=0", wait=0.03)
 
     if px_before is not None and px_after is not None:
         result["px_delta"] = abs(px_after - px_before)

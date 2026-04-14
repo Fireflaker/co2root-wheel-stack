@@ -12,7 +12,7 @@ This folder provides a direct, testable path from sim force input to Elmo comman
 
 ## Quick Start
 
-1. Close EAS or any app that may hold COM13.
+1. Start the adapter in inject mode. The launcher will now try to free COM13 automatically if a known holder is found.
 2. Start adapter in inject mode:
 
 ```powershell
@@ -22,8 +22,9 @@ cd e:/Co2Root/adapter_project
 
 Inject mode creates clear motor movement without depending on game telemetry.
 
-`start_adapter.ps1` now performs a COM13 preflight open/close before launch.
-If preflight fails, close any process using COM13 (for example demo `-UseElmo` or EAS) and retry.
+`start_adapter.ps1` performs a COM13 preflight open/close before launch.
+If preflight fails, it now attempts to stop known holder processes such as adapter/demo Python runs, related PowerShell launchers, and EAS/Composer windows, then retries the preflight once.
+Use `-SkipPortConflictCleanup` if you want the old fail-fast behavior without automatic cleanup.
 
 ## Verify Hardware Control (Proof)
 

@@ -22,6 +22,7 @@ def main() -> int:
     p.add_argument("--hold-ms", type=int, default=250)
     p.add_argument("--json-out", default="")
     p.add_argument("--leave-enabled", action="store_true")
+    p.add_argument("--allow-degraded-enable", action="store_true")
     args = p.parse_args()
 
     cfg = {
@@ -33,7 +34,7 @@ def main() -> int:
         "ethercat_profile_velocity": 120000,
         "ethercat_profile_acceleration": 250000,
         "ethercat_profile_deceleration": 250000,
-        "ethercat_allow_degraded_enable": False,
+        "ethercat_allow_degraded_enable": args.allow_degraded_enable,
         "serial_timeout_s": 0.2,
     }
 
@@ -43,6 +44,7 @@ def main() -> int:
         "baud": args.baud,
         "ethercat_adapter_match": args.ethercat_adapter_match,
         "ethercat_slave_index": args.ethercat_slave_index,
+        "allow_degraded_enable": args.allow_degraded_enable,
         "tc": args.tc,
         "mo": None,
         "px_before": None,

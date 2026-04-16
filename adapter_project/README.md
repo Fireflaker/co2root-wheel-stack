@@ -42,6 +42,7 @@ python ./verify_adapter_control.py --transport ethercat --ethercat-slave-index 1
 Pass condition: `px_delta >= 100` and exit code 0. When no motor is attached, the script still validates command path, mode, and status behavior, but movement-based pass criteria may not be met.
 
 The EtherCAT verification path now defaults to strict CiA402 enable behavior. If the drive cannot reach `Operation Enabled`, that is reported as a real hardware/setup issue instead of being hidden by the software.
+For bench diagnostics only, add `--allow-degraded-enable` if you intentionally want to permit switched-on fallback during verification.
 
 ## Use Sim Software Feed
 
@@ -79,7 +80,6 @@ Tune via config:
 
 - `status_log_every_s`: status print cadence (default `0.2`)
 - `px_poll_every_loops`: PX polling cadence relative to loop rate (default `10`)
-```
 
 ## GUI Checkpoints (single monitor)
 

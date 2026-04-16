@@ -146,6 +146,7 @@ class App:
         self.inject_fallback_var = tk.BooleanVar(value=bool(self.cfg.get("ffb_fallback_to_inject", True)))
         self.fallback_after_var = tk.StringVar(value=str(self.cfg.get("ffb_fallback_after_s", 1.0)))
         self.idle_release_var = tk.BooleanVar(value=bool(self.cfg.get("release_motor_on_idle_ffb", False)))
+        self.ethercat_degraded_enable_var = tk.BooleanVar(value=bool(self.cfg.get("ethercat_allow_degraded_enable", False)))
         self.test_current_var = tk.StringVar(value="280")
         self.spin_jv_var = tk.StringVar(value="1500")
         self.counts_per_rev_var = tk.StringVar(value="131072")
@@ -212,6 +213,15 @@ class App:
         ttk.Entry(cfg, textvariable=self.ethercat_profile_accel_var, width=12).grid(row=3, column=3, padx=6, pady=6, sticky="w")
         ttk.Label(cfg, text="ec_profile_decel").grid(row=3, column=4, padx=6, pady=6, sticky="w")
         ttk.Entry(cfg, textvariable=self.ethercat_profile_decel_var, width=12).grid(row=3, column=5, padx=6, pady=6, sticky="w")
+        ttk.Checkbutton(
+            cfg,
+            text="ethercat_allow_degraded_enable (bench only)",
+            variable=self.ethercat_degraded_enable_var,
+        ).grid(row=4, column=0, columnspan=3, padx=6, pady=6, sticky="w")
+        ttk.Label(
+            cfg,
+            text="Allows switched-on fallback if full Operation Enabled is unavailable. Keep off for production.",
+        ).grid(row=4, column=3, columnspan=3, padx=6, pady=6, sticky="w")
 
         tuning = ttk.LabelFrame(self.root, text="FFB And Output Mapping")
         tuning.pack(fill=tk.X, padx=10, pady=6)
@@ -542,6 +552,7 @@ class App:
             self.cfg["ethercat_profile_velocity"] = int(self.ethercat_profile_velocity_var.get().strip())
             self.cfg["ethercat_profile_acceleration"] = int(self.ethercat_profile_accel_var.get().strip())
             self.cfg["ethercat_profile_deceleration"] = int(self.ethercat_profile_decel_var.get().strip())
+            self.cfg["ethercat_allow_degraded_enable"] = bool(self.ethercat_degraded_enable_var.get())
             self.cfg["elmo_command_mode"] = self.cmd_mode_var.get().strip().lower()
             self.cfg["ffb_strength"] = float(self.ffb_strength_var.get().strip())
             self.cfg["max_current_a"] = float(self.max_current_a_var.get().strip())
@@ -567,8 +578,11 @@ class App:
                 f"sim_source={self.cfg['sim_source']} "
                 f"mode={self.cfg['elmo_command_mode']} "
                 f"ffb_strength={self.cfg['ffb_strength']} "
-                f"max_current_a={self.cfg['max_current_a']}"
+                f"max_current_a={self.cfg['max_current_a']} "
+                f"degraded_enable={self.cfg['ethercat_allow_degraded_enable']}"
             )
+            if self.cfg["elmo_transport"] == "ethercat" and self.cfg["ethercat_allow_degraded_enable"]:
+                self._log("WARN ethercat_allow_degraded_enable=true. Use this only for bench diagnostics, not normal runtime.")
         except Exception as exc:
             messagebox.showerror("Save failed", str(exc))
 
@@ -663,7 +677,8 @@ class App:
             self._log(
                 "HEALTH ethercat="
                 f"{'OK' if com_ok else 'DOWN'} "
-                f"adapter_match={self.cfg.get('ethercat_adapter_match')} slave_index={self.cfg.get('ethercat_slave_index')}"
+                f"adapter_match={self.cfg.get('ethercat_adapter_match')} slave_index={self.cfg.get('ethercat_slave_index')} "
+                f"degraded_enable={self.cfg.get('ethercat_allow_degraded_enable', False)}"
             )
         else:
             self._log(f"HEALTH {port}@{baud}={'OK' if com_ok else 'BUSY/DOWN'}")
@@ -826,6 +841,8 @@ class App:
             )
         elif command_mode == "tc":
             self._log(f"INFO elmo_command_mode=tc will use the configured {transport} transport.")
+        if transport == "ethercat" and bool(self.cfg.get("ethercat_allow_degraded_enable", False)):
+            self._log("WARN EtherCAT degraded enable is active. This is bench-only behavior and should stay off for normal use.")
         if bool(self.cfg.get("release_motor_on_idle_ffb", False)):
             self._log(
                 "WARN release_motor_on_idle_ffb=true. If game FFB drops near zero, the adapter will motor-off after the idle timeout and holding torque will fall away."

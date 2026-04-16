@@ -150,6 +150,8 @@ class App:
         self.test_current_var = tk.StringVar(value="280")
         self.spin_jv_var = tk.StringVar(value="1500")
         self.counts_per_rev_var = tk.StringVar(value="131072")
+        self.bench_current_a_var = tk.StringVar(value="1.0")
+        self.bench_hold_ms_var = tk.StringVar(value="250")
         self.ethercat_adapter_var = tk.StringVar(value=str(self.cfg.get("ethercat_adapter_match", "Realtek Gaming USB 2.5GbE Family Controller")))
         self.ethercat_slave_var = tk.StringVar(value=str(self.cfg.get("ethercat_slave_index", 1)))
         self.ethercat_profile_velocity_var = tk.StringVar(value=str(self.cfg.get("ethercat_profile_velocity", 120000)))
@@ -305,6 +307,25 @@ class App:
             text="These tests use the configured drive transport, read encoder position, then send a safe release sequence.",
         ).grid(row=1, column=3, columnspan=3, padx=6, pady=6, sticky="w")
 
+        bench = ttk.LabelFrame(self.root, text="Bench Tests")
+        bench.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Label(bench, text="current_a").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(bench, textvariable=self.bench_current_a_var, width=10).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(bench, text="hold_ms").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(bench, textvariable=self.bench_hold_ms_var, width=10).grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ttk.Button(bench, text="Probe All Drives", command=self.probe_all_drives).grid(row=0, column=4, padx=6, pady=6)
+        ttk.Button(bench, text="Probe Selected", command=self.probe_drive).grid(row=0, column=5, padx=6, pady=6)
+        ttk.Button(bench, text="Enable Selected", command=self.enable_selected_drive).grid(row=0, column=6, padx=6, pady=6)
+        ttk.Button(bench, text="Disable Selected", command=self.disable_selected_drive).grid(row=0, column=7, padx=6, pady=6)
+        ttk.Button(bench, text="Zero Output", command=self.zero_selected_drive).grid(row=1, column=0, padx=6, pady=6)
+        ttk.Button(bench, text="+Current Pulse", command=lambda: self.pulse_selected_drive_current(1)).grid(row=1, column=1, padx=6, pady=6)
+        ttk.Button(bench, text="-Current Pulse", command=lambda: self.pulse_selected_drive_current(-1)).grid(row=1, column=2, padx=6, pady=6)
+        ttk.Button(bench, text="+/- Current Pulse", command=self.bipolar_current_pulse).grid(row=1, column=3, padx=6, pady=6)
+        ttk.Label(
+            bench,
+            text="Bench buttons target the currently selected slave index and log MO, EC, PX, mode, and status before and after each action.",
+        ).grid(row=1, column=4, columnspan=4, padx=6, pady=6, sticky="w")
+
         pedals = ttk.LabelFrame(self.root, text="vJoy Pedals")
         pedals.pack(fill=tk.X, padx=10, pady=6)
         ttk.Label(pedals, text="Throttle").grid(row=0, column=0, padx=6, pady=6, sticky="w")
@@ -429,6 +450,51 @@ class App:
             return client.get_px()
         except Exception:
             return None
+
+    def _bench_current_counts(self) -> tuple[float, int]:
+        amps = float(self.bench_current_a_var.get().strip())
+        counts = int(round(amps * float(self.cfg.get("current_cmd_scale", 1000.0))))
+        return amps, counts
+
+    def _bench_hold_s(self) -> tuple[int, float]:
+        hold_ms = int(self.bench_hold_ms_var.get().strip())
+        return hold_ms, max(0.0, hold_ms / 1000.0)
+
+    def _log_drive_snapshot(self, client: Any, prefix: str = "") -> None:
+        details = client.describe()
+        label = f"{prefix} " if prefix else ""
+        self._log(
+            f"{label}drive snapshot: slave_index={self.cfg.get('ethercat_slave_index')} "
+            f"mo={client.get_mo()} ec={client.get_ec()} px={client.get_px()} "
+            f"mode_display={details.get('mode_display')} statusword={details.get('statusword')}"
+        )
+
+    def _run_bench_drive_task(self, name: str, worker: callable) -> None:
+        self.stop_managed(release_after_stop=True)
+        self.kill_conflicts()
+        self.save_config()
+        if not self._preflight_elmo_port(auto_cleanup=True):
+            self._log(f"{name} aborted: drive preflight did not succeed.")
+            return
+
+        def run() -> None:
+            self._set_status(f"Running: {name}")
+            try:
+                client = self._build_client()
+                client.open()
+                try:
+                    self._log_drive_snapshot(client, prefix=f"{name} before")
+                    worker(client)
+                    self._log_drive_snapshot(client, prefix=f"{name} after")
+                finally:
+                    client.close()
+            except Exception as exc:
+                self._log(f"{name} failed: {exc}")
+                self._elmo_log(f"{name} failed: {exc}")
+            finally:
+                self._set_status("Idle")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _wait_until_stable_client(
         self,
@@ -710,6 +776,39 @@ class App:
 
         threading.Thread(target=run_scan, daemon=True).start()
 
+    def probe_all_drives(self) -> None:
+        if not self._is_ethercat():
+            self._log("Probe All Drives is available only for EtherCAT transport.")
+            return
+
+        self.save_config()
+
+        def run_probe_all() -> None:
+            self._set_status("Running: probe_all_drives")
+            try:
+                infos = scan_ethercat_bus(self.cfg)
+                self._log(f"Probe All Drives: found {len(infos)} slave(s).")
+                original_slave_index = int(self.cfg.get("ethercat_slave_index", 1))
+                for info in infos:
+                    self.cfg["ethercat_slave_index"] = info.slave_index
+                    client = self._build_client()
+                    client.open()
+                    try:
+                        details = client.describe()
+                        self._log(
+                            f"slave[{info.slave_index}] serial={details.get('serial_number')} mo={client.get_mo()} ec={client.get_ec()} "
+                            f"px={client.get_px()} mode={details.get('mode_display')} statusword={details.get('statusword')}"
+                        )
+                    finally:
+                        client.close()
+                self.cfg["ethercat_slave_index"] = original_slave_index
+            except Exception as exc:
+                self._log(f"Probe All Drives failed: {exc}")
+            finally:
+                self._set_status("Idle")
+
+        threading.Thread(target=run_probe_all, daemon=True).start()
+
     def one_click_safe_bringup(self) -> None:
         def run() -> None:
             try:
@@ -740,6 +839,7 @@ class App:
     def probe_drive(self) -> None:
         def run_probe():
             try:
+                self.save_config()
                 client = self._build_client()
                 client.open()
                 try:
@@ -756,6 +856,101 @@ class App:
                 self._elmo_log(f"Probe failed: {exc}")
 
         threading.Thread(target=run_probe, daemon=True).start()
+
+    def enable_selected_drive(self) -> None:
+        def worker(client: Any) -> None:
+            self._log(f"Enable Selected => {client.set_motor_on()}")
+
+        self._run_bench_drive_task("enable_selected_drive", worker)
+
+    def disable_selected_drive(self) -> None:
+        def worker(client: Any) -> None:
+            try:
+                self._log(f"TC0 => {client.set_tc(0)}")
+            except Exception:
+                pass
+            try:
+                self._log(f"IL0 => {client.set_il(0)}")
+            except Exception:
+                pass
+            self._log(f"STOP => {client.stop_motion()}")
+            self._log(f"MO0 => {client.set_motor_off()}")
+
+        self._run_bench_drive_task("disable_selected_drive", worker)
+
+    def zero_selected_drive(self) -> None:
+        def worker(client: Any) -> None:
+            try:
+                self._log(f"TC0 => {client.set_tc(0)}")
+            except Exception as exc:
+                self._log(f"TC0 skipped: {exc}")
+            try:
+                self._log(f"IL0 => {client.set_il(0)}")
+            except Exception as exc:
+                self._log(f"IL0 skipped: {exc}")
+
+        self._run_bench_drive_task("zero_selected_drive", worker)
+
+    def pulse_selected_drive_current(self, direction: int) -> None:
+        try:
+            amps, counts = self._bench_current_counts()
+            hold_ms, hold_s = self._bench_hold_s()
+        except Exception as exc:
+            messagebox.showerror("Invalid bench settings", str(exc))
+            return
+
+        signed_counts = counts if direction >= 0 else -counts
+        signed_amps = amps if direction >= 0 else -amps
+        task_name = "pulse_selected_drive_current_pos" if direction >= 0 else "pulse_selected_drive_current_neg"
+
+        def worker(client: Any) -> None:
+            px_before = client.get_px()
+            self._log(f"MO1 => {client.set_motor_on()}")
+            self._log(f"IL {signed_amps:.3f}A ({signed_counts} counts) => {client.set_il(signed_counts)}")
+            time.sleep(hold_s)
+            px_mid = client.get_px()
+            self._log(f"IL0 => {client.set_il(0)}")
+            try:
+                self._log(f"STOP => {client.stop_motion()}")
+            except Exception:
+                pass
+            px_after = client.get_px()
+            delta = None if px_before is None or px_after is None else px_after - px_before
+            self._log(
+                f"Current pulse result: amps={signed_amps:.3f} hold_ms={hold_ms} px_before={px_before} px_mid={px_mid} px_after={px_after} delta={delta}"
+            )
+
+        self._run_bench_drive_task(task_name, worker)
+
+    def bipolar_current_pulse(self) -> None:
+        try:
+            amps, counts = self._bench_current_counts()
+            hold_ms, hold_s = self._bench_hold_s()
+        except Exception as exc:
+            messagebox.showerror("Invalid bench settings", str(exc))
+            return
+
+        def worker(client: Any) -> None:
+            px_before = client.get_px()
+            self._log(f"MO1 => {client.set_motor_on()}")
+            self._log(f"IL +{amps:.3f}A ({counts} counts) => {client.set_il(counts)}")
+            time.sleep(hold_s)
+            px_mid = client.get_px()
+            self._log(f"IL -{amps:.3f}A ({-counts} counts) => {client.set_il(-counts)}")
+            time.sleep(hold_s)
+            px_mid2 = client.get_px()
+            self._log(f"IL0 => {client.set_il(0)}")
+            try:
+                self._log(f"STOP => {client.stop_motion()}")
+            except Exception:
+                pass
+            px_after = client.get_px()
+            delta = None if px_before is None or px_after is None else px_after - px_before
+            self._log(
+                f"Bipolar current pulse result: amps={amps:.3f} hold_ms={hold_ms} px_before={px_before} px_mid={px_mid} px_mid2={px_mid2} px_after={px_after} delta={delta}"
+            )
+
+        self._run_bench_drive_task("bipolar_current_pulse", worker)
 
     def release_motor(self) -> None:
         def run_release():

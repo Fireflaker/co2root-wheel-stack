@@ -90,3 +90,14 @@ Take before/after screenshot and click specific screen coordinate:
 ```
 
 Screenshots are saved in `adapter_project/screenshots`.
+
+## GUI Bench Tests
+
+The master GUI now includes a `Bench Tests` section intended for operator-driven lab verification.
+
+- `Probe All Drives` logs state for every EtherCAT slave.
+- `Enable Selected` and `Disable Selected` act on the configured `ethercat_slave_index`.
+- `Zero Output` sends zero torque/current commands without starting the runtime adapter.
+- `+Current Pulse`, `-Current Pulse`, and `+/- Current Pulse` convert the GUI `current_a` field to drive counts using `current_cmd_scale`, apply the pulse, and log before/after position and status.
+
+These buttons are meant for supervised bench use from the GUI, not unattended runtime operation.

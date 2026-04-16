@@ -16,10 +16,11 @@ Focused export of the direct-drive wheel control stack from the larger Co2Root w
 - Current checked-in config defaults to EtherCAT slave 1 on the Realtek USB 2.5GbE adapter
 - Live EtherCAT validation previously confirmed 4 Elmo Whistle slaves on the bus
 - The new transport uses standard CiA402 objects for mode, controlword, target torque, and target position
-- `adapter_project/config.json` is set to `sim_source = websocket`
+- `adapter_project/config.json` is set to `sim_source = vjoy_ffb`
 - SimHub telemetry endpoint expected at `127.0.0.1:8888`
 - LFS is the fastest validated target for end-to-end bring-up
 - EtherCAT on Windows requires elevation because raw packet access is used through Npcap/WinPcap-compatible APIs
+- The legacy launcher now uses runtime overrides instead of editing `adapter_project/config.json`
 
 ## Recommended bring-up
 

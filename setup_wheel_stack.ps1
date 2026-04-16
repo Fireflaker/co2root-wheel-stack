@@ -2,7 +2,7 @@ param(
     [string]$WorkspaceRoot = "e:/Co2Root",
     [string]$Com0ComA = "COM10",
     [string]$Com0ComB = "COM11",
-    [ValidateSet("websocket", "http", "serial")]
+    [ValidateSet("websocket", "http", "serial", "vjoy_ffb")]
     [string]$FfbSource = "websocket",
     [switch]$SkipInstall,
     [switch]$VerboseMode
@@ -202,7 +202,7 @@ function Main {
     if ($FfbSource -eq "serial") {
         Ensure-Com0ComPair
     } else {
-        Write-Ok "Using SimHub WebSocket mode, com0com not required"
+        Write-Ok "Selected FFB source does not require com0com"
     }
 
     Ensure-SimHubInstalled

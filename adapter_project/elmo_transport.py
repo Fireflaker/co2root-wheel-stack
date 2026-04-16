@@ -83,6 +83,46 @@ class BaseElmoClient:
         return {}
 
 
+def probe_tc_support(elmo: Any, probe_value: int) -> tuple[bool, str]:
+    probe_resp = elmo.set_tc(int(probe_value))
+    zero_resp = ""
+    if int(probe_value) != 0:
+        zero_resp = elmo.set_tc(0)
+    ec = elmo.get_ec()
+    responses = [resp for resp in (probe_resp, zero_resp) if resp]
+    if any(response_indicates_elmo_error(resp) for resp in responses):
+        return False, f"TC rejected responses={responses!r} ec={ec!r}"
+    if ec not in (None, 0):
+        return False, f"TC probe left nonzero EC={ec!r} responses={responses!r}"
+    return True, f"TC probe accepted responses={responses!r} ec={ec!r}"
+
+
+def resolve_runtime_command_mode(elmo: Any, cfg: dict, requested_mode: str) -> tuple[str, str]:
+    mode = str(requested_mode).lower().strip()
+    if mode == "il":
+        return mode, "runtime mode=il"
+    if mode != "tc":
+        return mode, f"runtime mode={mode}"
+
+    if not bool(cfg.get("tc_probe_on_start", True)):
+        return mode, "runtime mode=tc (probe disabled)"
+
+    ok, detail = probe_tc_support(elmo, int(cfg.get("tc_probe_value", 0)))
+    if ok:
+        return mode, detail
+
+    if bool(cfg.get("require_true_torque", False)):
+        raise RuntimeError(f"True torque required but TC probe failed: {detail}")
+
+    if not bool(cfg.get("fallback_to_pr_on_tc_reject", True)):
+        raise RuntimeError(f"TC probe failed and PR fallback is disabled: {detail}")
+
+    elmo.set_um(int(cfg.get("pr_fallback_um", 5)))
+    if cfg.get("pr_fallback_rm") is not None:
+        elmo.set_rm(int(cfg.get("pr_fallback_rm", 1)))
+    return "pr", f"TC unavailable; falling back to PR ({detail})"
+
+
 class SerialElmoClient(BaseElmoClient):
     def __init__(self, port: str, baud: int, timeout_s: float = 0.008):
         self.port = port
@@ -151,6 +191,17 @@ class SerialElmoClient(BaseElmoClient):
 
 
 class EthercatElmoClient(BaseElmoClient):
+    STATE_MASK = 0x006F
+    STATE_READY_TO_SWITCH_ON = 0x0021
+    STATE_SWITCHED_ON = 0x0023
+    STATE_OPERATION_ENABLED = 0x0027
+    CONTROLWORD_SHUTDOWN = 0x0006
+    CONTROLWORD_SWITCH_ON = 0x0007
+    CONTROLWORD_ENABLE_OPERATION = 0x000F
+    CONTROLWORD_DISABLE_VOLTAGE = 0x0000
+    CONTROLWORD_QUICK_STOP = 0x010F
+    CONTROLWORD_NEW_SETPOINT = 0x003F
+    CONTROLWORD_FAULT_RESET = 0x0080
     MODE_PROFILE_POSITION = 1
     MODE_PROFILE_VELOCITY = 3
     MODE_PROFILE_TORQUE = 4
@@ -165,6 +216,7 @@ class EthercatElmoClient(BaseElmoClient):
         profile_velocity: int,
         profile_acceleration: int,
         profile_deceleration: int,
+        allow_degraded_enable: bool = False,
         pysoem_module: Any | None = None,
     ):
         self.adapter_match = adapter_match
@@ -172,6 +224,7 @@ class EthercatElmoClient(BaseElmoClient):
         self.profile_velocity = int(profile_velocity)
         self.profile_acceleration = int(profile_acceleration)
         self.profile_deceleration = int(profile_deceleration)
+        self.allow_degraded_enable = bool(allow_degraded_enable)
         self._pysoem = pysoem_module
         self.master = None
         self.slave = None
@@ -264,11 +317,20 @@ class EthercatElmoClient(BaseElmoClient):
     def _statusword(self) -> int:
         return self._read_u16(0x6041, 0x00)
 
+    def _masked_state(self, statusword: int) -> int:
+        return statusword & self.STATE_MASK
+
     def _controlword(self) -> int:
         return self._read_u16(0x6040, 0x00)
 
     def _write_controlword(self, value: int) -> None:
         self._write_u16(0x6040, value, 0x00)
+
+    def _fault_code(self) -> int | None:
+        try:
+            return self._read_u16(0x603F, 0x00)
+        except Exception:
+            return None
 
     def _mode_display(self) -> int:
         return self._read_i8(0x6061, 0x00)
@@ -292,7 +354,7 @@ class EthercatElmoClient(BaseElmoClient):
     def _reset_fault_if_present(self) -> None:
         status = self._statusword()
         if status & 0x0008:
-            self._write_controlword(0x0080)
+            self._write_controlword(self.CONTROLWORD_FAULT_RESET)
             time.sleep(0.02)
 
     def _wait_for_status(self, predicate: Callable[[int], bool], timeout_s: float = 0.25) -> int:
@@ -307,28 +369,47 @@ class EthercatElmoClient(BaseElmoClient):
 
     def _ensure_operation_enabled(self) -> int:
         self._reset_fault_if_present()
-        self._write_controlword(0x0006)
-        self._wait_for_status(lambda sw: (sw & 0x006F) in (0x0021, 0x0023, 0x0027))
-        self._write_controlword(0x0007)
-        switched_on = self._wait_for_status(lambda sw: (sw & 0x006F) in (0x0023, 0x0027))
-        self._write_controlword(0x000F)
-        status = self._wait_for_status(lambda sw: (sw & 0x006F) == 0x0027, timeout_s=0.08)
-        if (status & 0x006F) == 0x0027:
+        self._write_controlword(self.CONTROLWORD_SHUTDOWN)
+        self._wait_for_status(
+            lambda sw: self._masked_state(sw) in (
+                self.STATE_READY_TO_SWITCH_ON,
+                self.STATE_SWITCHED_ON,
+                self.STATE_OPERATION_ENABLED,
+            )
+        )
+        self._write_controlword(self.CONTROLWORD_SWITCH_ON)
+        switched_on = self._wait_for_status(
+            lambda sw: self._masked_state(sw) in (
+                self.STATE_SWITCHED_ON,
+                self.STATE_OPERATION_ENABLED,
+            )
+        )
+        self._write_controlword(self.CONTROLWORD_ENABLE_OPERATION)
+        status = self._wait_for_status(
+            lambda sw: self._masked_state(sw) == self.STATE_OPERATION_ENABLED,
+            timeout_s=0.08,
+        )
+        if self._masked_state(status) == self.STATE_OPERATION_ENABLED:
             return status
 
         if status & 0x0008:
-            self._write_controlword(0x0080)
-            time.sleep(0.02)
-            self._write_controlword(0x0006)
-            self._wait_for_status(lambda sw: (sw & 0x006F) in (0x0021, 0x0023, 0x0027))
-            self._write_controlword(0x0007)
-            switched_on = self._wait_for_status(lambda sw: (sw & 0x006F) in (0x0023, 0x0027), timeout_s=0.08)
+            fault_code = self._fault_code()
+            if self.allow_degraded_enable and self._masked_state(switched_on) == self.STATE_SWITCHED_ON:
+                return switched_on
+            raise RuntimeError(
+                f"EtherCAT drive failed to reach Operation Enabled: statusword=0x{status:04x} fault=0x{(fault_code or 0):04x}"
+            )
 
-        return switched_on
+        if self.allow_degraded_enable and self._masked_state(switched_on) == self.STATE_SWITCHED_ON:
+            return switched_on
+
+        raise RuntimeError(
+            f"EtherCAT drive failed to reach Operation Enabled: statusword=0x{status:04x}"
+        )
 
     def get_mo(self) -> Optional[int]:
-        state = self._statusword() & 0x006F
-        return 1 if state in (0x0021, 0x0023, 0x0027) else 0
+        state = self._masked_state(self._statusword())
+        return 1 if state in (self.STATE_READY_TO_SWITCH_ON, self.STATE_SWITCHED_ON, self.STATE_OPERATION_ENABLED) else 0
 
     def get_px(self) -> Optional[int]:
         return self._read_i32(0x6064, 0x00)
@@ -336,10 +417,7 @@ class EthercatElmoClient(BaseElmoClient):
     def get_ec(self) -> Optional[int]:
         status = self._statusword()
         if status & 0x0008:
-            try:
-                return self._read_u16(0x603F, 0x00)
-            except Exception:
-                return 1
+            return self._fault_code() or 1
         return 0
 
     def set_motor_on(self) -> str:
@@ -347,7 +425,7 @@ class EthercatElmoClient(BaseElmoClient):
         return f"statusword=0x{status:04x}"
 
     def set_motor_off(self) -> str:
-        self._write_controlword(0x0000)
+        self._write_controlword(self.CONTROLWORD_DISABLE_VOLTAGE)
         status = self._wait_for_status(lambda sw: bool(sw & 0x0040) or not (sw & 0x0004))
         return f"statusword=0x{status:04x}"
 
@@ -393,9 +471,9 @@ class EthercatElmoClient(BaseElmoClient):
 
     def begin_motion(self) -> str:
         self._ensure_operation_enabled()
-        self._write_controlword(0x003F)
+        self._write_controlword(self.CONTROLWORD_NEW_SETPOINT)
         time.sleep(0.002)
-        self._write_controlword(0x000F)
+        self._write_controlword(self.CONTROLWORD_ENABLE_OPERATION)
         status = self._statusword()
         return f"statusword=0x{status:04x}"
 
@@ -404,9 +482,9 @@ class EthercatElmoClient(BaseElmoClient):
             self._write_i16(0x6071, 0, 0x00)
         except Exception:
             pass
-        self._write_controlword(0x010F)
+        self._write_controlword(self.CONTROLWORD_QUICK_STOP)
         time.sleep(0.002)
-        self._write_controlword(0x000F)
+        self._write_controlword(self.CONTROLWORD_ENABLE_OPERATION)
         status = self._statusword()
         return f"statusword=0x{status:04x}"
 
@@ -442,6 +520,7 @@ def build_elmo_client(cfg: dict) -> BaseElmoClient:
             profile_velocity=int(cfg.get("ethercat_profile_velocity", 120000)),
             profile_acceleration=int(cfg.get("ethercat_profile_acceleration", 250000)),
             profile_deceleration=int(cfg.get("ethercat_profile_deceleration", 250000)),
+            allow_degraded_enable=bool(cfg.get("ethercat_allow_degraded_enable", False)),
         )
     return SerialElmoClient(
         str(cfg.get("elmo_port", "COM13")),
@@ -457,6 +536,7 @@ def scan_ethercat_bus(cfg: dict, pysoem_module: Any | None = None) -> list[Ether
         profile_velocity=int(cfg.get("ethercat_profile_velocity", 120000)),
         profile_acceleration=int(cfg.get("ethercat_profile_acceleration", 250000)),
         profile_deceleration=int(cfg.get("ethercat_profile_deceleration", 250000)),
+        allow_degraded_enable=bool(cfg.get("ethercat_allow_degraded_enable", False)),
         pysoem_module=pysoem_module,
     )
     pysoem = client._module()

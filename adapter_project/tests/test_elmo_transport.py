@@ -20,11 +20,12 @@ class FakeAdapter:
 
 
 class FakeSlave:
-    def __init__(self, serial_number: int):
+    def __init__(self, serial_number: int, fail_enable_operation: bool = False):
         self.name = "Whistle"
         self.man = 154
         self.id = 198948
         self.rev = 66550
+        self.fail_enable_operation = fail_enable_operation
         self.storage = {
             (0x6040, 0x00): struct.pack("<H", 0),
             (0x6041, 0x00): struct.pack("<H", 0x0250),
@@ -57,7 +58,11 @@ class FakeSlave:
             elif value == 0x0007:
                 self.storage[(0x6041, 0x00)] = struct.pack("<H", 0x0233)
             elif value == 0x000F:
-                self.storage[(0x6041, 0x00)] = struct.pack("<H", 0x0237)
+                if self.fail_enable_operation:
+                    self.storage[(0x6041, 0x00)] = struct.pack("<H", 0x1208)
+                    self.storage[(0x603F, 0x00)] = struct.pack("<H", 0xFF10)
+                else:
+                    self.storage[(0x6041, 0x00)] = struct.pack("<H", 0x0237)
             elif value == 0x0000:
                 self.storage[(0x6041, 0x00)] = struct.pack("<H", 0x0250)
             elif value == 0x0080:
@@ -144,6 +149,41 @@ class ElmoTransportTests(unittest.TestCase):
             self.assertEqual(client.describe()["mode_display"], 1)
         finally:
             client.close()
+
+    def test_ethercat_enable_requires_explicit_degraded_opt_in(self):
+        fake_module = FakePysoem([FakeSlave(333, fail_enable_operation=True)])
+
+        strict_client = EthercatElmoClient(
+            adapter_match="Realtek Gaming USB 2.5GbE Family Controller",
+            slave_index=1,
+            profile_velocity=120000,
+            profile_acceleration=250000,
+            profile_deceleration=250000,
+            allow_degraded_enable=False,
+            pysoem_module=fake_module,
+        )
+        strict_client.open()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "failed to reach Operation Enabled"):
+                strict_client.set_motor_on()
+        finally:
+            strict_client.close()
+
+        degraded_client = EthercatElmoClient(
+            adapter_match="Realtek Gaming USB 2.5GbE Family Controller",
+            slave_index=1,
+            profile_velocity=120000,
+            profile_acceleration=250000,
+            profile_deceleration=250000,
+            allow_degraded_enable=True,
+            pysoem_module=fake_module,
+        )
+        degraded_client.open()
+        try:
+            response = degraded_client.set_motor_on()
+            self.assertIn("statusword=0x0233", response)
+        finally:
+            degraded_client.close()
 
     def test_scan_ethercat_bus_reads_identity_strings(self):
         fake_module = FakePysoem([FakeSlave(101), FakeSlave(202)])

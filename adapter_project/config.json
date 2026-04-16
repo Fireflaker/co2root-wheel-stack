@@ -7,6 +7,7 @@
     "ethercat_profile_velocity": 120000,
     "ethercat_profile_acceleration": 250000,
     "ethercat_profile_deceleration": 250000,
+    "ethercat_allow_degraded_enable": false,
     "sim_source": "vjoy_ffb",
     "sim_serial_port": "COM11",
     "sim_serial_baud": 115200,

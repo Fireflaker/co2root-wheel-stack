@@ -15,6 +15,20 @@ function Test-IsAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-PythonExe {
+    $localVenv = Join-Path (Split-Path $PSScriptRoot -Parent) ".venv\Scripts\python.exe"
+    if (Test-Path $localVenv) {
+        return $localVenv
+    }
+
+    $parentVenv = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) ".venv\Scripts\python.exe"
+    if (Test-Path $parentVenv) {
+        return $parentVenv
+    }
+
+    return "python"
+}
+
 function Test-MasterGuiRunning {
     $name = "Global\Co2Root_MasterControlGUI"
     try {
@@ -111,22 +125,47 @@ function Test-ElmoPortPreflight {
     }
 }
 
+function Test-EthercatPreflight {
+    param([string]$PythonExe, [string]$ConfigPath)
+
+    $script = @'
+from pathlib import Path
+import json
+import sys
+
+config_path = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(config_path.parent))
+
+from elmo_transport import build_elmo_client
+
+cfg = json.loads(config_path.read_text(encoding="utf-8"))
+client = build_elmo_client(cfg)
+client.open()
+try:
+    print(client.describe())
+finally:
+    client.close()
+'@
+
+    $null = $script | & $PythonExe - $ConfigPath
+}
+
 $venvActivate = Join-Path (Split-Path $PSScriptRoot -Parent) ".venv/Scripts/Activate.ps1"
 if (Test-Path $venvActivate) {
     . $venvActivate
 }
+
+$pythonExe = Get-PythonExe
 
 $configPath = Join-Path $PSScriptRoot "config.json"
 if (-not (Test-Path $configPath)) {
     throw "Missing config file: $configPath"
 }
 
-# Patch only sim_source for this run while preserving all other settings.
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
-$config.sim_source = $Source
-$config | ConvertTo-Json -Depth 6 | Set-Content $configPath -Encoding ascii
+$transport = [string]$config.elmo_transport
 
-if (($config.elmo_transport -eq 'ethercat') -and -not (Test-IsAdmin)) {
+if (($transport -eq 'ethercat') -and -not (Test-IsAdmin)) {
     Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Source', $Source, '-BypassMasterWarning')
     exit 0
 }
@@ -134,7 +173,7 @@ if (($config.elmo_transport -eq 'ethercat') -and -not (Test-IsAdmin)) {
 $elmoPort = [string]$config.elmo_port
 $elmoBaud = [int]$config.elmo_baud
 
-if (-not $SkipPortPreflight) {
+if (($transport -eq 'serial') -and -not $SkipPortPreflight) {
     try {
         Test-ElmoPortPreflight -PortName $elmoPort -BaudRate $elmoBaud
     }
@@ -155,7 +194,14 @@ if (-not $SkipPortPreflight) {
             throw "COM port preflight failed for $elmoPort even after automatic cleanup. Close EAS or any unknown holder, or rerun with -SkipPortConflictCleanup if you only want fail-fast behavior. Original error: $($_.Exception.Message)"
         }
     }
+} elseif ($transport -eq 'ethercat') {
+    try {
+        Test-EthercatPreflight -PythonExe $pythonExe -ConfigPath $configPath
+    }
+    catch {
+        throw "EtherCAT preflight failed for adapter '$($config.ethercat_adapter_match)' slave index $($config.ethercat_slave_index). Original error: $($_.Exception.Message)"
+    }
 }
 
-Write-Host "Starting adapter with source: $Source (transport=$($config.elmo_transport) elmo_port=$elmoPort)"
-python "$PSScriptRoot/adapter_main.py"
+Write-Host "Starting adapter with source: $Source (transport=$transport elmo_port=$elmoPort)"
+& $pythonExe "$PSScriptRoot/adapter_main.py" --sim-source $Source

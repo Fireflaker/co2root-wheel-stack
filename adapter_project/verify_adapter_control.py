@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Direct control verification for Adapter project on Elmo COM port."""
+"""Direct control verification for the adapter project over serial or EtherCAT."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ def main() -> int:
         "ethercat_profile_velocity": 120000,
         "ethercat_profile_acceleration": 250000,
         "ethercat_profile_deceleration": 250000,
+        "ethercat_allow_degraded_enable": False,
         "serial_timeout_s": 0.2,
     }
 

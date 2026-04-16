@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import math
 import os
-import re
 import signal
 import sys
 import threading
@@ -19,7 +19,12 @@ from typing import Optional
 import serial
 
 from vjoy_state import load_input_state, pedal_to_vjoy_axis, released_pedal_vjoy_axis
-from elmo_transport import build_elmo_client
+from elmo_transport import (
+    build_elmo_client,
+    parse_last_int,
+    resolve_runtime_command_mode,
+    response_indicates_elmo_error,
+)
 
 
 ERROR_SUCCESS = 0
@@ -138,6 +143,7 @@ DEFAULT_CONFIG = {
     "ethercat_profile_velocity": 120000,
     "ethercat_profile_acceleration": 250000,
     "ethercat_profile_deceleration": 250000,
+    "ethercat_allow_degraded_enable": False,
     "sim_source": "vjoy_ffb",  # serial | http | websocket | inject | vjoy_ffb
     "sim_serial_port": "COM11",
     "sim_serial_baud": 115200,
@@ -185,17 +191,6 @@ DEFAULT_CONFIG = {
 }
 
 
-def parse_last_int(text: str) -> Optional[int]:
-    nums = re.findall(r"-?\d+", text)
-    if not nums:
-        return None
-    return int(nums[-1])
-
-
-def response_indicates_elmo_error(text: str) -> bool:
-    return "?;" in (text or "")
-
-
 class SingleInstance:
     def __init__(self, name: str):
         self._name = name
@@ -211,108 +206,6 @@ class SingleInstance:
     def __exit__(self, exc_type, exc, tb):
         if self._handle:
             ctypes.windll.kernel32.CloseHandle(self._handle)
-
-
-class ElmoClient:
-    def __init__(self, port: str, baud: int, timeout_s: float = 0.008):
-        self.port = port
-        self.baud = baud
-        self.timeout_s = timeout_s
-        self.ser: Optional[serial.Serial] = None
-
-    def open(self) -> None:
-        self.ser = serial.Serial(self.port, self.baud, timeout=max(0.001, float(self.timeout_s)))
-        time.sleep(0.05)
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-
-    def close(self) -> None:
-        if self.ser and self.ser.is_open:
-            self.ser.close()
-
-    def send(self, cmd: str, wait: float = 0.001) -> str:
-        assert self.ser is not None
-        self.ser.write((cmd + "\r").encode("ascii"))
-        self.ser.flush()
-        time.sleep(wait)
-        raw = self.ser.read(self.ser.in_waiting or 128)
-        return raw.decode("ascii", errors="replace").strip()
-
-    def get_mo(self) -> Optional[int]:
-        return parse_last_int(self.send("MO"))
-
-    def get_px(self) -> Optional[int]:
-        return parse_last_int(self.send("PX"))
-
-    def get_ec(self) -> Optional[int]:
-        return parse_last_int(self.send("EC"))
-
-    def set_motor_on(self) -> str:
-        return self.send("MO=1")
-
-    def set_motor_off(self) -> str:
-        return self.send("MO=0")
-
-    def set_tc(self, tc: int) -> str:
-        return self.send(f"TC={tc}", wait=0.0)
-
-    def set_il(self, il: int) -> str:
-        return self.send(f"IL={il}", wait=0.0)
-
-    def set_um(self, um: int) -> str:
-        return self.send(f"UM={int(um)}")
-
-    def set_rm(self, rm: int) -> str:
-        return self.send(f"RM={int(rm)}")
-
-    def set_pr(self, pr: int) -> str:
-        return self.send(f"PR={int(pr)}", wait=0.0)
-
-    def begin_motion(self) -> str:
-        return self.send("BG", wait=0.0)
-
-    def stop_motion(self) -> str:
-        return self.send("ST", wait=0.0)
-
-
-def probe_tc_support(elmo: ElmoClient, probe_value: int) -> tuple[bool, str]:
-    probe_resp = elmo.set_tc(int(probe_value))
-    zero_resp = ""
-    if int(probe_value) != 0:
-        zero_resp = elmo.set_tc(0)
-    ec = elmo.get_ec()
-    responses = [resp for resp in (probe_resp, zero_resp) if resp]
-    if any(response_indicates_elmo_error(resp) for resp in responses):
-        return False, f"TC rejected responses={responses!r} ec={ec!r}"
-    if ec not in (None, 0):
-        return False, f"TC probe left nonzero EC={ec!r} responses={responses!r}"
-    return True, f"TC probe accepted responses={responses!r} ec={ec!r}"
-
-
-def resolve_runtime_command_mode(elmo: ElmoClient, cfg: dict, requested_mode: str) -> tuple[str, str]:
-    mode = str(requested_mode).lower().strip()
-    if mode == "il":
-        return mode, "runtime mode=il"
-    if mode != "tc":
-        return mode, f"runtime mode={mode}"
-
-    if not bool(cfg.get("tc_probe_on_start", True)):
-        return mode, "runtime mode=tc (probe disabled)"
-
-    ok, detail = probe_tc_support(elmo, int(cfg.get("tc_probe_value", 0)))
-    if ok:
-        return mode, detail
-
-    if bool(cfg.get("require_true_torque", False)):
-        raise RuntimeError(f"True torque required but TC probe failed: {detail}")
-
-    if not bool(cfg.get("fallback_to_pr_on_tc_reject", True)):
-        raise RuntimeError(f"TC probe failed and PR fallback is disabled: {detail}")
-
-    elmo.set_um(int(cfg.get("pr_fallback_um", 5)))
-    if cfg.get("pr_fallback_rm") is not None:
-        elmo.set_rm(int(cfg.get("pr_fallback_rm", 1)))
-    return "pr", f"TC unavailable; falling back to PR ({detail})"
 
 
 class FfbSourceBase:
@@ -1095,9 +988,20 @@ def try_init_vjoy(cfg: dict):
         return None
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="")
+    parser.add_argument("--sim-source", choices=["inject", "http", "serial", "websocket", "vjoy_ffb"], default="")
+    return parser.parse_args()
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent
-    cfg = load_config(root / "config.json")
+    args = parse_args()
+    config_path = Path(args.config) if args.config else (root / "config.json")
+    cfg = load_config(config_path)
+    if args.sim_source:
+        cfg["sim_source"] = args.sim_source
     loop_dt = 1.0 / float(cfg["loop_hz"])
     status_log_every_s = max(0.05, float(cfg.get("status_log_every_s", 1.0)))
     px_poll_every_loops = max(1, int(cfg.get("px_poll_every_loops", 1)))

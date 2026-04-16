@@ -1,0 +1,88 @@
+adapter_name=\Device\NPF_{1ED1FFF2-29FD-4011-BE9C-06FBE065A56C}
+adapter_desc=Realtek Gaming USB 2.5GbE Family Controller
+phase1.slave_count=4
+phase1.slave[1].name=? M:0000009a I:00030924
+phase1.slave[1].mode_before.command=0
+phase1.slave[1].mode_before.display=0
+phase1.slave[1].test.profile_position=write_ok;command=1;display=1
+phase1.slave[1].test.profile_velocity=write_ok;command=3;display=3
+phase1.slave[1].test.profile_torque=write_ok;command=4;display=4
+phase1.slave[1].test.cyclic_sync_position=write_ok;command=8;display=8
+phase1.slave[1].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase1.slave[1].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase1.slave[2].name=? M:0000009a I:00030924
+phase1.slave[2].mode_before.command=0
+phase1.slave[2].mode_before.display=0
+phase1.slave[2].test.profile_position=write_ok;command=1;display=1
+phase1.slave[2].test.profile_velocity=write_ok;command=3;display=3
+phase1.slave[2].test.profile_torque=write_ok;command=4;display=4
+phase1.slave[2].test.cyclic_sync_position=write_ok;command=8;display=8
+phase1.slave[2].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase1.slave[2].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase1.slave[3].name=? M:0000009a I:00030924
+phase1.slave[3].mode_before.command=0
+phase1.slave[3].mode_before.display=0
+phase1.slave[3].test.profile_position=write_ok;command=1;display=1
+phase1.slave[3].test.profile_velocity=write_ok;command=3;display=3
+phase1.slave[3].test.profile_torque=write_ok;command=4;display=4
+phase1.slave[3].test.cyclic_sync_position=write_ok;command=8;display=8
+phase1.slave[3].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase1.slave[3].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase1.slave[4].name=? M:0000009a I:00030924
+phase1.slave[4].mode_before.command=0
+phase1.slave[4].mode_before.display=0
+phase1.slave[4].test.profile_position=write_ok;command=1;display=1
+phase1.slave[4].test.profile_velocity=write_ok;command=3;display=3
+phase1.slave[4].test.profile_torque=write_ok;command=4;display=4
+phase1.slave[4].test.cyclic_sync_position=write_ok;command=8;display=8
+phase1.slave[4].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase1.slave[4].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase2_reopen.slave_count=4
+phase2_reopen.slave[1].name=? M:0000009a I:00030924
+phase2_reopen.slave[1].mode_before.command=10
+phase2_reopen.slave[1].mode_before.display=10
+phase2_reopen.slave[1].test.profile_position=write_ok;command=1;display=1
+phase2_reopen.slave[1].test.profile_velocity=write_ok;command=3;display=3
+phase2_reopen.slave[1].test.profile_torque=write_ok;command=4;display=4
+phase2_reopen.slave[1].test.cyclic_sync_position=write_ok;command=8;display=8
+phase2_reopen.slave[1].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase2_reopen.slave[1].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase2_reopen.slave[2].name=? M:0000009a I:00030924
+phase2_reopen.slave[2].mode_before.command=10
+phase2_reopen.slave[2].mode_before.display=10
+phase2_reopen.slave[2].test.profile_position=write_ok;command=1;display=1
+phase2_reopen.slave[2].test.profile_velocity=write_ok;command=3;display=3
+phase2_reopen.slave[2].test.profile_torque=write_ok;command=4;display=4
+phase2_reopen.slave[2].test.cyclic_sync_position=write_ok;command=8;display=8
+phase2_reopen.slave[2].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase2_reopen.slave[2].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase2_reopen.slave[3].name=? M:0000009a I:00030924
+phase2_reopen.slave[3].mode_before.command=10
+phase2_reopen.slave[3].mode_before.display=10
+phase2_reopen.slave[3].test.profile_position=write_ok;command=1;display=1
+phase2_reopen.slave[3].test.profile_velocity=write_ok;command=3;display=3
+phase2_reopen.slave[3].test.profile_torque=write_ok;command=4;display=4
+phase2_reopen.slave[3].test.cyclic_sync_position=write_ok;command=8;display=8
+phase2_reopen.slave[3].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase2_reopen.slave[3].test.cyclic_sync_torque=write_ok;command=10;display=10
+phase2_reopen.slave[4].name=? M:0000009a I:00030924
+phase2_reopen.slave[4].mode_before.command=10
+phase2_reopen.slave[4].mode_before.display=10
+phase2_reopen.slave[4].test.profile_position=write_ok;command=1;display=1
+phase2_reopen.slave[4].test.profile_velocity=write_ok;command=3;display=3
+phase2_reopen.slave[4].test.profile_torque=write_ok;command=4;display=4
+phase2_reopen.slave[4].test.cyclic_sync_position=write_ok;command=8;display=8
+phase2_reopen.slave[4].test.cyclic_sync_velocity=write_ok;command=9;display=9
+phase2_reopen.slave[4].test.cyclic_sync_torque=write_ok;command=10;display=10
+persistence.slave[1].before=0
+persistence.slave[1].after_reopen=10
+persistence.slave[1].sticky_after_reopen=False
+persistence.slave[2].before=0
+persistence.slave[2].after_reopen=10
+persistence.slave[2].sticky_after_reopen=False
+persistence.slave[3].before=0
+persistence.slave[3].after_reopen=10
+persistence.slave[3].sticky_after_reopen=False
+persistence.slave[4].before=0
+persistence.slave[4].after_reopen=10
+persistence.slave[4].sticky_after_reopen=False

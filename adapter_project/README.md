@@ -1,11 +1,12 @@
 # Adapter Project
 
-This folder provides a direct, testable path from sim force input to Elmo command output on COM13.
+This folder provides a direct, testable path from sim force input to Elmo drive output over either serial or EtherCAT.
 
 ## Files
 
-- `adapter_main.py`: Runtime adapter loop (FFB source -> PR/TC command -> optional vJoy).
+- `adapter_main.py`: Runtime adapter loop (FFB source -> drive command -> optional vJoy).
 - `config.json`: Runtime settings.
+- `elmo_transport.py`: Shared serial and EtherCAT transport layer for the Elmo drive path.
 - `start_adapter.ps1`: Single command launcher with selectable source mode.
 - `verify_adapter_control.py`: Direct hardware verification pulse test.
 - `gui_checkpoint.ps1`: Screenshot + optional click helper for live UI checkpoints.
@@ -22,18 +23,18 @@ cd e:/Co2Root/adapter_project
 
 Inject mode creates clear motor movement without depending on game telemetry.
 
-`start_adapter.ps1` performs a COM13 preflight open/close before launch.
-If preflight fails, it now attempts to stop known holder processes such as adapter/demo Python runs, related PowerShell launchers, and EAS/Composer windows, then retries the preflight once.
-Use `-SkipPortConflictCleanup` if you want the old fail-fast behavior without automatic cleanup.
+`start_adapter.ps1` performs a drive preflight before launch.
+For serial it checks COM access. For EtherCAT it attempts an adapter open against the configured slave path.
+If `elmo_transport` is `ethercat`, the launcher will relaunch elevated because Windows raw EtherCAT access requires admin.
 
 ## Verify Hardware Control (Proof)
 
 ```powershell
 cd e:/Co2Root/adapter_project
-python ./verify_adapter_control.py --port COM13 --tc 140 --hold-ms 250 --json-out ./last_verify.json
+python ./verify_adapter_control.py --transport ethercat --ethercat-slave-index 1 --tc 140 --hold-ms 250 --json-out ./last_verify.json
 ```
 
-Pass condition: `px_delta >= 100` and exit code 0.
+Pass condition: `px_delta >= 100` and exit code 0. When no motor is attached, the script still validates command path, mode, and status behavior, but movement-based pass criteria may not be met.
 
 ## Use Sim Software Feed
 
@@ -47,7 +48,11 @@ Example:
 ```powershell
 ./start_adapter.ps1 -Source http
 
-Note: on current COM13 firmware in this repo, PR mode is the validated runtime path (`elmo_command_mode: "pr"`).
+Notes:
+
+- EtherCAT mode uses standard CiA402 objects such as `6040h`, `6041h`, `6060h`, `6061h`, `6064h`, `6071h`, and `607Ah`.
+- `elmo_command_mode=pr` maps to profile position mode on the EtherCAT transport.
+- `elmo_command_mode=il` and `elmo_command_mode=tc` both use torque-oriented EtherCAT writes; `tc` is the preferred FFB path.
 
 ## Runtime Telemetry
 

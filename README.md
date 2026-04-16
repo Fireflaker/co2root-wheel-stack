@@ -12,11 +12,14 @@ Focused export of the direct-drive wheel control stack from the larger Co2Root w
 
 ## Current validated state
 
-- COM13 Elmo probe responds correctly to `MO`, `EC`, `UM`, and `PX`
+- EtherCAT transport support is wired into the main adapter and master GUI
+- Current checked-in config defaults to EtherCAT slave 1 on the Realtek USB 2.5GbE adapter
+- Live EtherCAT validation previously confirmed 4 Elmo Whistle slaves on the bus
+- The new transport uses standard CiA402 objects for mode, controlword, target torque, and target position
 - `adapter_project/config.json` is set to `sim_source = websocket`
 - SimHub telemetry endpoint expected at `127.0.0.1:8888`
 - LFS is the fastest validated target for end-to-end bring-up
-- Current Elmo path uses `pr` mode fallback instead of direct torque control
+- EtherCAT on Windows requires elevation because raw packet access is used through Npcap/WinPcap-compatible APIs
 
 ## Recommended bring-up
 
@@ -35,3 +38,4 @@ Then follow:
 
 - This export intentionally excludes logs, screenshots, downloads, caches, and unrelated workspace content.
 - The surrounding workspace contains other projects and large binary artifacts that are not part of this repo.
+- If `elmo_transport` is `ethercat`, the GUI launcher will relaunch itself elevated.

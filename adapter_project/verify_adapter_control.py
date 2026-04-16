@@ -5,39 +5,43 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import time
 from pathlib import Path
 
-import serial
-
-
-def parse_last_int(text: str):
-    m = re.findall(r"-?\d+", text)
-    return int(m[-1]) if m else None
-
-
-def send(ser: serial.Serial, cmd: str, wait: float = 0.05) -> str:
-    ser.write((cmd + "\r").encode("ascii"))
-    ser.flush()
-    time.sleep(wait)
-    raw = ser.read(ser.in_waiting or 128)
-    return raw.decode("ascii", errors="replace").strip()
+from elmo_transport import build_elmo_client
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
+    p.add_argument("--transport", choices=["serial", "ethercat"], default="serial")
     p.add_argument("--port", default="COM13")
     p.add_argument("--baud", type=int, default=115200)
+    p.add_argument("--ethercat-adapter-match", default="Realtek Gaming USB 2.5GbE Family Controller")
+    p.add_argument("--ethercat-slave-index", type=int, default=1)
     p.add_argument("--tc", type=int, default=140)
     p.add_argument("--hold-ms", type=int, default=250)
     p.add_argument("--json-out", default="")
     p.add_argument("--leave-enabled", action="store_true")
     args = p.parse_args()
 
+    cfg = {
+        "elmo_transport": args.transport,
+        "elmo_port": args.port,
+        "elmo_baud": args.baud,
+        "ethercat_adapter_match": args.ethercat_adapter_match,
+        "ethercat_slave_index": args.ethercat_slave_index,
+        "ethercat_profile_velocity": 120000,
+        "ethercat_profile_acceleration": 250000,
+        "ethercat_profile_deceleration": 250000,
+        "serial_timeout_s": 0.2,
+    }
+
     result = {
+        "transport": args.transport,
         "port": args.port,
         "baud": args.baud,
+        "ethercat_adapter_match": args.ethercat_adapter_match,
+        "ethercat_slave_index": args.ethercat_slave_index,
         "tc": args.tc,
         "mo": None,
         "px_before": None,
@@ -46,39 +50,42 @@ def main() -> int:
         "pass": False,
     }
 
-    with serial.Serial(args.port, args.baud, timeout=0.2) as ser:
-        time.sleep(0.12)
+    client = build_elmo_client(cfg)
+    client.open()
+    try:
         try:
-            ser.reset_input_buffer()
-            ser.reset_output_buffer()
+            details = client.describe()
+            result.update({f"detail_{key}": value for key, value in details.items()})
         except Exception:
             pass
 
-        mo = parse_last_int(send(ser, "MO"))
+        mo = client.get_mo()
         if mo != 1:
-            send(ser, "MO=1")
+            client.set_motor_on()
             time.sleep(0.08)
-            mo = parse_last_int(send(ser, "MO"))
+            mo = client.get_mo()
         result["mo"] = mo
 
-        px_before = parse_last_int(send(ser, "PX"))
+        px_before = client.get_px()
         result["px_before"] = px_before
 
         # Small bidirectional pulse for safe movement proof.
-        send(ser, f"TC={args.tc}", wait=0.0)
+        client.set_tc(args.tc)
         time.sleep(args.hold_ms / 1000.0)
-        send(ser, f"TC={-args.tc}", wait=0.0)
+        client.set_tc(-args.tc)
         time.sleep(args.hold_ms / 1000.0)
-        send(ser, "TC=0", wait=0.0)
+        client.set_tc(0)
         time.sleep(0.1)
 
-        px_after = parse_last_int(send(ser, "PX"))
+        px_after = client.get_px()
         result["px_after"] = px_after
 
         if not args.leave_enabled:
-            send(ser, "TC=0", wait=0.0)
-            send(ser, "ST", wait=0.03)
-            send(ser, "MO=0", wait=0.03)
+            client.set_tc(0)
+            client.stop_motion()
+            client.set_motor_off()
+    finally:
+        client.close()
 
     if px_before is not None and px_after is not None:
         result["px_delta"] = abs(px_after - px_before)

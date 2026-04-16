@@ -19,6 +19,7 @@ from typing import Optional
 import serial
 
 from vjoy_state import load_input_state, pedal_to_vjoy_axis, released_pedal_vjoy_axis
+from elmo_transport import build_elmo_client
 
 
 ERROR_SUCCESS = 0
@@ -129,8 +130,14 @@ class VJoyFFBRampEffect(ctypes.Structure):
 
 
 DEFAULT_CONFIG = {
+    "elmo_transport": "ethercat",
     "elmo_port": "COM13",
     "elmo_baud": 115200,
+    "ethercat_adapter_match": "Realtek Gaming USB 2.5GbE Family Controller",
+    "ethercat_slave_index": 1,
+    "ethercat_profile_velocity": 120000,
+    "ethercat_profile_acceleration": 250000,
+    "ethercat_profile_deceleration": 250000,
     "sim_source": "vjoy_ffb",  # serial | http | websocket | inject | vjoy_ffb
     "sim_serial_port": "COM11",
     "sim_serial_baud": 115200,
@@ -1100,11 +1107,7 @@ def main() -> int:
     sim_mode = str(cfg.get("sim_source", "inject")).lower().strip()
 
     with SingleInstance("Global\\Co2Root_AdapterProject"):
-        elmo = ElmoClient(
-            str(cfg["elmo_port"]),
-            int(cfg["elmo_baud"]),
-            float(cfg.get("serial_timeout_s", 0.008)),
-        )
+        elmo = build_elmo_client(cfg)
         src = build_source(cfg)
         fallback_src: Optional[InjectFfbSource] = None
         if sim_mode == "vjoy_ffb" and bool(cfg.get("ffb_fallback_to_inject", True)):

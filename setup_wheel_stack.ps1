@@ -24,13 +24,17 @@ function Ensure-Directory($path) {
 function Get-PythonExe {
     $venv = Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"
     if (Test-Path $venv) { return $venv }
+
+    $parentVenv = Join-Path (Split-Path $WorkspaceRoot -Parent) ".venv\Scripts\python.exe"
+    if (Test-Path $parentVenv) { return $parentVenv }
+
     return "python"
 }
 
 function Install-PythonDeps {
     Write-Step "Ensuring Python dependencies"
     $python = Get-PythonExe
-    & $python -m pip install --disable-pip-version-check pyserial pyvjoy | Out-Host
+    & $python -m pip install --disable-pip-version-check pyserial pyvjoy pysoem requests websocket-client | Out-Host
     Write-Ok "Python dependencies ready"
 }
 
@@ -134,7 +138,8 @@ function Ensure-SimHubInstalled {
     }
 
     if (-not (Test-Path $installerPath)) {
-        throw "SimHub installer not found in workspace. Put installer at $installerPath or run manually once."
+        Write-WarnX "SimHub installer not found in workspace. Put installer at $installerPath or install SimHub manually later."
+        return
     }
 
     Write-Step "Installing SimHub silently"
@@ -146,6 +151,21 @@ function Ensure-SimHubInstalled {
     } else {
         Write-Ok "SimHub installed"
     }
+}
+
+function Test-NpcapPresence {
+    $dllCandidates = @(
+        "C:\Windows\System32\Npcap\wpcap.dll",
+        "C:\Windows\System32\wpcap.dll"
+    )
+
+    foreach ($candidate in $dllCandidates) {
+        if (Test-Path $candidate) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Write-SimHubTemplate {
@@ -186,6 +206,12 @@ function Main {
     }
 
     Ensure-SimHubInstalled
+
+    if (Test-NpcapPresence) {
+        Write-Ok "Npcap runtime detected for EtherCAT path"
+    } else {
+        Write-WarnX "Npcap runtime not detected. EtherCAT transport will not work until Npcap is installed."
+    }
 
     if ($FfbSource -eq "serial") {
         Write-SimHubTemplate

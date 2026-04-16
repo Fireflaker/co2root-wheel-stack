@@ -29,6 +29,7 @@ try:
 except Exception:  # pragma: no cover
     serial = None
 
+from elmo_transport import build_elmo_client, scan_ethercat_bus
 from vjoy_state import save_input_state
 
 
@@ -126,6 +127,7 @@ class App:
         self.session_log = LOG_DIR / f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         self.throttle_var = tk.DoubleVar(value=0.0)
         self.brake_var = tk.DoubleVar(value=0.0)
+        self.transport_var = tk.StringVar(value=str(self.cfg.get("elmo_transport", "serial")))
         self.cmd_mode_var = tk.StringVar(value=str(self.cfg.get("elmo_command_mode", "pr")))
         self.ffb_strength_var = tk.StringVar(value=str(self.cfg.get("ffb_strength", 1.0)))
         self.max_current_a_var = tk.StringVar(value=str(self.cfg.get("max_current_a", 0.0)))
@@ -147,6 +149,11 @@ class App:
         self.test_current_var = tk.StringVar(value="280")
         self.spin_jv_var = tk.StringVar(value="1500")
         self.counts_per_rev_var = tk.StringVar(value="131072")
+        self.ethercat_adapter_var = tk.StringVar(value=str(self.cfg.get("ethercat_adapter_match", "Realtek Gaming USB 2.5GbE Family Controller")))
+        self.ethercat_slave_var = tk.StringVar(value=str(self.cfg.get("ethercat_slave_index", 1)))
+        self.ethercat_profile_velocity_var = tk.StringVar(value=str(self.cfg.get("ethercat_profile_velocity", 120000)))
+        self.ethercat_profile_accel_var = tk.StringVar(value=str(self.cfg.get("ethercat_profile_acceleration", 250000)))
+        self.ethercat_profile_decel_var = tk.StringVar(value=str(self.cfg.get("ethercat_profile_deceleration", 250000)))
 
         self._build_ui()
         self._write_vjoy_pedal_state(log_change=False)
@@ -174,15 +181,17 @@ class App:
         cfg = ttk.LabelFrame(self.root, text="Config")
         cfg.pack(fill=tk.X, padx=10, pady=6)
 
+        ttk.Label(cfg, text="Drive transport").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        ttk.Combobox(cfg, textvariable=self.transport_var, values=["ethercat", "serial"], width=14, state="readonly").grid(row=0, column=1, padx=6, pady=6, sticky="w")
         self.src_var = tk.StringVar(value=str(self.cfg.get("sim_source", "websocket")))
-        ttk.Label(cfg, text="Sim source").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        ttk.Combobox(cfg, textvariable=self.src_var, values=["websocket", "http", "serial", "inject", "vjoy_ffb"], width=14, state="readonly").grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(cfg, text="Sim source").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Combobox(cfg, textvariable=self.src_var, values=["websocket", "http", "serial", "inject", "vjoy_ffb"], width=14, state="readonly").grid(row=0, column=3, padx=6, pady=6, sticky="w")
 
         self.auto_on_var = tk.BooleanVar(value=bool(self.cfg.get("auto_motor_on", False)))
-        ttk.Checkbutton(cfg, text="auto_motor_on", variable=self.auto_on_var).grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        ttk.Checkbutton(cfg, text="auto_motor_on", variable=self.auto_on_var).grid(row=0, column=4, padx=6, pady=6, sticky="w")
 
         self.off_on_exit_var = tk.BooleanVar(value=bool(self.cfg.get("motor_off_on_exit", True)))
-        ttk.Checkbutton(cfg, text="motor_off_on_exit", variable=self.off_on_exit_var).grid(row=0, column=3, padx=6, pady=6, sticky="w")
+        ttk.Checkbutton(cfg, text="motor_off_on_exit", variable=self.off_on_exit_var).grid(row=0, column=5, padx=6, pady=6, sticky="w")
 
         self.loop_var = tk.StringVar(value=str(self.cfg.get("loop_hz", 200)))
         ttk.Label(cfg, text="loop_hz").grid(row=1, column=0, padx=6, pady=6, sticky="w")
@@ -191,6 +200,18 @@ class App:
         self.px_skip_var = tk.StringVar(value=str(self.cfg.get("px_poll_every_loops", 1)))
         ttk.Label(cfg, text="px_poll_every_loops").grid(row=1, column=2, padx=6, pady=6, sticky="w")
         ttk.Entry(cfg, textvariable=self.px_skip_var, width=10).grid(row=1, column=3, padx=6, pady=6, sticky="w")
+
+        ttk.Label(cfg, text="ethercat_adapter_match").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(cfg, textvariable=self.ethercat_adapter_var, width=38).grid(row=2, column=1, columnspan=3, padx=6, pady=6, sticky="we")
+        ttk.Label(cfg, text="ethercat_slave_index").grid(row=2, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(cfg, textvariable=self.ethercat_slave_var, width=10).grid(row=2, column=5, padx=6, pady=6, sticky="w")
+
+        ttk.Label(cfg, text="ec_profile_velocity").grid(row=3, column=0, padx=6, pady=6, sticky="w")
+        ttk.Entry(cfg, textvariable=self.ethercat_profile_velocity_var, width=12).grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        ttk.Label(cfg, text="ec_profile_accel").grid(row=3, column=2, padx=6, pady=6, sticky="w")
+        ttk.Entry(cfg, textvariable=self.ethercat_profile_accel_var, width=12).grid(row=3, column=3, padx=6, pady=6, sticky="w")
+        ttk.Label(cfg, text="ec_profile_decel").grid(row=3, column=4, padx=6, pady=6, sticky="w")
+        ttk.Entry(cfg, textvariable=self.ethercat_profile_decel_var, width=12).grid(row=3, column=5, padx=6, pady=6, sticky="w")
 
         tuning = ttk.LabelFrame(self.root, text="FFB And Output Mapping")
         tuning.pack(fill=tk.X, padx=10, pady=6)
@@ -244,10 +265,11 @@ class App:
         ttk.Button(btns, text="Save Config", command=self.save_config).grid(row=0, column=0, padx=6, pady=6)
         ttk.Button(btns, text="Kill Conflicts", command=self.kill_conflicts).grid(row=0, column=1, padx=6, pady=6)
         ttk.Button(btns, text="Probe Drive", command=self.probe_drive).grid(row=0, column=2, padx=6, pady=6)
-        ttk.Button(btns, text="Release Motor", command=self.release_motor).grid(row=0, column=3, padx=6, pady=6)
-        ttk.Button(btns, text="Start Adapter", command=self.start_adapter).grid(row=0, column=4, padx=6, pady=6)
-        ttk.Button(btns, text="Start Safe vJoy", command=self.start_safe_vjoy).grid(row=0, column=5, padx=6, pady=6)
-        ttk.Button(btns, text="Stop Managed", command=self.stop_managed).grid(row=0, column=6, padx=6, pady=6)
+        ttk.Button(btns, text="Scan EtherCAT", command=self.scan_ethercat).grid(row=0, column=3, padx=6, pady=6)
+        ttk.Button(btns, text="Release Motor", command=self.release_motor).grid(row=0, column=4, padx=6, pady=6)
+        ttk.Button(btns, text="Start Adapter", command=self.start_adapter).grid(row=0, column=5, padx=6, pady=6)
+        ttk.Button(btns, text="Start Safe vJoy", command=self.start_safe_vjoy).grid(row=0, column=6, padx=6, pady=6)
+        ttk.Button(btns, text="Stop Managed", command=self.stop_managed).grid(row=0, column=7, padx=6, pady=6)
         ttk.Button(btns, text="Health Check", command=self.health_check).grid(row=1, column=0, padx=6, pady=6)
         ttk.Button(btns, text="One-Click Safe Bring-up", command=self.one_click_safe_bringup).grid(row=1, column=1, padx=6, pady=6, columnspan=2, sticky="we")
         ttk.Button(btns, text="Open Logs Folder", command=self.open_logs_folder).grid(row=1, column=3, padx=6, pady=6)
@@ -270,7 +292,7 @@ class App:
         ttk.Button(auto, text="Rotate +1 Rev", command=lambda: self.rotate_one_rev(1)).grid(row=1, column=2, padx=6, pady=6)
         ttk.Label(
             auto,
-            text="These tests drive the wheel directly, read encoder PX, then send ST/TC=0/MO=0.",
+            text="These tests use the configured drive transport, read encoder position, then send a safe release sequence.",
         ).grid(row=1, column=3, columnspan=3, padx=6, pady=6, sticky="w")
 
         pedals = ttk.LabelFrame(self.root, text="vJoy Pedals")
@@ -386,6 +408,60 @@ class App:
     def _query_int(self, sp: Any, cmd: str, read_wait_s: float = 0.08) -> int | None:
         return self._parse_last_int(self._elmo_exchange(sp, cmd, read_wait_s=read_wait_s))
 
+    def _is_ethercat(self) -> bool:
+        return str(self.cfg.get("elmo_transport", "serial")).strip().lower() == "ethercat"
+
+    def _build_client(self):
+        return build_elmo_client(self.cfg)
+
+    def _query_position(self, client: Any) -> int | None:
+        try:
+            return client.get_px()
+        except Exception:
+            return None
+
+    def _wait_until_stable_client(
+        self,
+        client: Any,
+        expected_abs_delta: int,
+        timeout_s: float = 8.0,
+        stable_window_s: float = 0.3,
+        poll_s: float = 0.06,
+    ) -> tuple[int | None, int | None, int | None]:
+        px0 = self._query_position(client)
+        if px0 is None:
+            return None, None, None
+
+        t0 = time.time()
+        reached = False
+        stable_since: float | None = None
+        last_px = px0
+
+        while time.time() - t0 < timeout_s:
+            px = self._query_position(client)
+            if px is None:
+                time.sleep(poll_s)
+                continue
+
+            delta = px - px0
+            if abs(delta) >= max(1, int(expected_abs_delta * 0.90)):
+                reached = True
+
+            if px == last_px:
+                if stable_since is None:
+                    stable_since = time.time()
+            else:
+                stable_since = None
+                last_px = px
+
+            if reached and stable_since is not None and (time.time() - stable_since) >= stable_window_s:
+                return px0, px, delta
+
+            time.sleep(poll_s)
+
+        px_end = self._query_position(client)
+        return px0, px_end, (None if px_end is None else px_end - px0)
+
     def _wait_until_stable(
         self,
         sp: Any,
@@ -428,30 +504,22 @@ class App:
         px_end = self._query_int(sp, "PX", read_wait_s=0.03)
         return px0, px_end, (None if px_end is None else px_end - px0)
 
-    def _run_autonomous_serial_task(self, name: str, worker: callable) -> None:
-        if serial is None:
-            self._log("pyserial unavailable.")
-            return
-
+    def _run_autonomous_drive_task(self, name: str, worker: callable) -> None:
         self.stop_managed(release_after_stop=True)
         self.kill_conflicts()
         if not self._preflight_elmo_port(auto_cleanup=True):
-            self._log(f"{name} aborted: COM preflight did not succeed.")
+            self._log(f"{name} aborted: drive preflight did not succeed.")
             return
 
         def run() -> None:
             self._set_status(f"Running: {name}")
             try:
-                port = str(self.cfg.get("elmo_port", "COM13"))
-                baud = int(self.cfg.get("elmo_baud", 115200))
-                with serial.Serial(port, baud, timeout=0.25) as sp:
-                    time.sleep(0.12)
-                    try:
-                        sp.reset_input_buffer()
-                        sp.reset_output_buffer()
-                    except Exception:
-                        pass
-                    worker(sp)
+                client = self._build_client()
+                client.open()
+                try:
+                    worker(client)
+                finally:
+                    client.close()
             except Exception as exc:
                 self._log(f"{name} failed: {exc}")
                 self._elmo_log(f"{name} failed: {exc}")
@@ -463,11 +531,17 @@ class App:
 
     def save_config(self) -> None:
         try:
+            self.cfg["elmo_transport"] = self.transport_var.get().strip().lower()
             self.cfg["sim_source"] = self.src_var.get().strip()
             self.cfg["auto_motor_on"] = bool(self.auto_on_var.get())
             self.cfg["motor_off_on_exit"] = bool(self.off_on_exit_var.get())
             self.cfg["loop_hz"] = int(self.loop_var.get().strip())
             self.cfg["px_poll_every_loops"] = int(self.px_skip_var.get().strip())
+            self.cfg["ethercat_adapter_match"] = self.ethercat_adapter_var.get().strip()
+            self.cfg["ethercat_slave_index"] = int(self.ethercat_slave_var.get().strip())
+            self.cfg["ethercat_profile_velocity"] = int(self.ethercat_profile_velocity_var.get().strip())
+            self.cfg["ethercat_profile_acceleration"] = int(self.ethercat_profile_accel_var.get().strip())
+            self.cfg["ethercat_profile_deceleration"] = int(self.ethercat_profile_decel_var.get().strip())
             self.cfg["elmo_command_mode"] = self.cmd_mode_var.get().strip().lower()
             self.cfg["ffb_strength"] = float(self.ffb_strength_var.get().strip())
             self.cfg["max_current_a"] = float(self.max_current_a_var.get().strip())
@@ -489,6 +563,7 @@ class App:
             self._save_cfg()
             self._log(
                 "Config saved. "
+                f"transport={self.cfg['elmo_transport']} "
                 f"sim_source={self.cfg['sim_source']} "
                 f"mode={self.cfg['elmo_command_mode']} "
                 f"ffb_strength={self.cfg['ffb_strength']} "
@@ -521,6 +596,28 @@ class App:
             return False
 
     def _preflight_elmo_port(self, auto_cleanup: bool = True) -> bool:
+        if self._is_ethercat():
+            try:
+                client = self._build_client()
+                client.open()
+                client.close()
+                return True
+            except Exception as exc:
+                self._log(f"EtherCAT preflight failed: {exc}")
+                if auto_cleanup:
+                    self._log("Attempting automatic conflict cleanup for EtherCAT path.")
+                    self.kill_conflicts()
+                    time.sleep(0.5)
+                    try:
+                        client = self._build_client()
+                        client.open()
+                        client.close()
+                        self._log("EtherCAT preflight succeeded after cleanup.")
+                        return True
+                    except Exception as retry_exc:
+                        self._log(f"EtherCAT preflight still failed after cleanup: {retry_exc}")
+                return False
+
         if serial is None:
             self._log("pyserial unavailable.")
             return False
@@ -556,21 +653,47 @@ class App:
         ws_url = str(self.cfg.get("sim_ws_url", "ws://127.0.0.1:8888"))
         direct_vjoy = str(self.cfg.get("sim_source", "")).lower().strip() == "vjoy_ffb"
         simhub_port_ok = self._is_port_open("127.0.0.1", 8888)
-        com_ok = self._can_open_serial(port, baud)
+        com_ok = self._can_open_serial(port, baud) if not self._is_ethercat() else self._preflight_elmo_port(auto_cleanup=False)
         if direct_vjoy:
             self._log(f"HEALTH vjoy_interface_dll={'OK' if VJOY_INTERFACE_DLL.exists() else 'MISSING'} path={VJOY_INTERFACE_DLL}")
             self._log("HEALTH simhub=NOT_REQUIRED for sim_source=vjoy_ffb")
         else:
             self._log(f"HEALTH simhub_port_8888={'OK' if simhub_port_ok else 'DOWN'}")
-        self._log(f"HEALTH {port}@{baud}={'OK' if com_ok else 'BUSY/DOWN'}")
+        if self._is_ethercat():
+            self._log(
+                "HEALTH ethercat="
+                f"{'OK' if com_ok else 'DOWN'} "
+                f"adapter_match={self.cfg.get('ethercat_adapter_match')} slave_index={self.cfg.get('ethercat_slave_index')}"
+            )
+        else:
+            self._log(f"HEALTH {port}@{baud}={'OK' if com_ok else 'BUSY/DOWN'}")
         self._log(f"HEALTH sim_source={self.cfg.get('sim_source')} sim_ws_url={ws_url}")
         self._log(
             "HEALTH output_mode="
-            f"{self.cfg.get('elmo_command_mode')} "
+            f"{self.cfg.get('elmo_command_mode')} transport={self.cfg.get('elmo_transport')} "
             f"ffb_strength={self.cfg.get('ffb_strength')} "
             f"max_current_a={self.cfg.get('max_current_a')} "
             f"motor_current_utilization={self.cfg.get('motor_current_utilization')}"
         )
+
+    def scan_ethercat(self) -> None:
+        if not self._is_ethercat():
+            self._log("Scan EtherCAT skipped: drive transport is not set to ethercat.")
+            return
+
+        def run_scan() -> None:
+            try:
+                infos = scan_ethercat_bus(self.cfg)
+                self._log(f"EtherCAT scan found {len(infos)} slave(s).")
+                for info in infos:
+                    self._log(
+                        f"EtherCAT slave[{info.slave_index}] name={info.device_name or info.name} "
+                        f"vendor={info.vendor_id} product={info.product_code} rev={info.revision} serial={info.serial_number}"
+                    )
+            except Exception as exc:
+                self._log(f"EtherCAT scan failed: {exc}")
+
+        threading.Thread(target=run_scan, daemon=True).start()
 
     def one_click_safe_bringup(self) -> None:
         def run() -> None:
@@ -600,19 +723,19 @@ class App:
             self._log(f"Open logs folder failed: {exc}")
 
     def probe_drive(self) -> None:
-        if serial is None:
-            self._log("pyserial unavailable.")
-            return
-        port = str(self.cfg.get("elmo_port", "COM13"))
-        baud = int(self.cfg.get("elmo_baud", 115200))
-
         def run_probe():
             try:
-                with serial.Serial(port, baud, timeout=0.25) as sp:
-                    time.sleep(0.1)
-                    for cmd in ("MO", "EC", "UM", "PX"):
-                        resp = self._elmo_exchange(sp, cmd, read_wait_s=0.15)
-                        self._log(f"{cmd} => {resp or '<no-response>'}")
+                client = self._build_client()
+                client.open()
+                try:
+                    details = client.describe()
+                    for key, value in details.items():
+                        self._log(f"{key} => {value}")
+                    self._log(f"MO => {client.get_mo()}")
+                    self._log(f"EC => {client.get_ec()}")
+                    self._log(f"PX => {client.get_px()}")
+                finally:
+                    client.close()
             except Exception as exc:
                 self._log(f"Probe failed: {exc}")
                 self._elmo_log(f"Probe failed: {exc}")
@@ -620,27 +743,22 @@ class App:
         threading.Thread(target=run_probe, daemon=True).start()
 
     def release_motor(self) -> None:
-        if serial is None:
-            self._log("pyserial unavailable.")
-            return
         def run_release():
             self._run_release_sequence()
 
         threading.Thread(target=run_release, daemon=True).start()
 
     def _run_release_sequence(self) -> bool:
-        if serial is None:
-            self._log("pyserial unavailable.")
-            return False
-
-        port = str(self.cfg.get("elmo_port", "COM13"))
-        baud = int(self.cfg.get("elmo_baud", 115200))
         try:
-            with serial.Serial(port, baud, timeout=0.25) as sp:
-                time.sleep(0.1)
-                for cmd in ("ST", "TC=0", "MO=0", "MO"):
-                    resp = self._elmo_exchange(sp, cmd, read_wait_s=0.12)
-                    self._log(f"{cmd} => {resp or '<no-response>'}")
+            client = self._build_client()
+            client.open()
+            try:
+                self._log(f"STOP => {client.stop_motion()}")
+                self._log(f"TC0 => {client.set_tc(0)}")
+                self._log(f"MO0 => {client.set_motor_off()}")
+                self._log(f"MO => {client.get_mo()}")
+            finally:
+                client.close()
             self._log("Motor release sequence done. Shaft should be disabled.")
             self._elmo_log("Release sequence done.")
             return True
@@ -649,11 +767,11 @@ class App:
             self._elmo_log(f"Release failed: {exc}")
             return False
 
-    def _start_managed(self, args: list[str], name: str) -> None:
+    def _start_managed(self, args: list[str], name: str, require_drive_preflight: bool = True) -> None:
         self.stop_managed(release_after_stop=True)
         self.kill_conflicts()
-        if not self._preflight_elmo_port(auto_cleanup=True):
-            self._log(f"Start {name} aborted: COM preflight did not succeed.")
+        if require_drive_preflight and not self._preflight_elmo_port(auto_cleanup=True):
+            self._log(f"Start {name} aborted: drive preflight did not succeed.")
             return
         try:
             self.proc = subprocess.Popen(
@@ -685,6 +803,7 @@ class App:
         self.save_config()
         sim_source = str(self.cfg.get("sim_source", "")).lower().strip()
         command_mode = str(self.cfg.get("elmo_command_mode", "pr")).lower().strip()
+        transport = str(self.cfg.get("elmo_transport", "serial")).lower().strip()
         if str(self.cfg.get("sim_source", "")).lower() == "websocket" and not self._is_port_open("127.0.0.1", 8888):
             self._log("WARN sim_source=websocket but SimHub port 8888 is not reachable.")
         if sim_source != "vjoy_ffb":
@@ -694,7 +813,7 @@ class App:
         else:
             self._log(
                 "Starting adapter for direct game FFB via vJoy. "
-                f"mode={command_mode} device={self.cfg.get('vjoy_device_id')} SimHub not required."
+                f"transport={transport} mode={command_mode} device={self.cfg.get('vjoy_device_id')} SimHub not required."
             )
         if command_mode == "pr":
             self._log("INFO elmo_command_mode=pr uses motion-reference fallback. Current-limit fields are saved but do not directly drive output in PR mode.")
@@ -706,7 +825,7 @@ class App:
                 f"min_current_a={self.cfg.get('min_current_a')}"
             )
         elif command_mode == "tc":
-            self._log("WARN elmo_command_mode=tc is exposed for completeness, but this hardware has previously rejected TC commands.")
+            self._log(f"INFO elmo_command_mode=tc will use the configured {transport} transport.")
         if bool(self.cfg.get("release_motor_on_idle_ffb", False)):
             self._log(
                 "WARN release_motor_on_idle_ffb=true. If game FFB drops near zero, the adapter will motor-off after the idle timeout and holding torque will fall away."
@@ -721,7 +840,11 @@ class App:
         python_exe = str((ROOT.parent / ".venv" / "Scripts" / "python.exe").resolve())
         if not Path(python_exe).exists():
             python_exe = sys.executable
-        self._start_managed([python_exe, str((ROOT / "wheel_sim_bridge.py").resolve()), "--mode", "vjoy"], "wheel_sim_bridge_safe")
+        self._start_managed(
+            [python_exe, str((ROOT / "wheel_sim_bridge.py").resolve()), "--mode", "vjoy"],
+            "wheel_sim_bridge_safe",
+            require_drive_preflight=False,
+        )
 
     def auto_spin_verify(self) -> None:
         try:
@@ -731,51 +854,40 @@ class App:
             messagebox.showerror("Invalid test settings", str(exc))
             return
 
-        def worker(sp: Any) -> None:
-            selected_um = None
-            for candidate in (2, 5, 4):
-                self._elmo_exchange(sp, "MO=0", read_wait_s=0.04)
-                self._elmo_exchange(sp, f"UM={candidate}", read_wait_s=0.04)
-                um = self._query_int(sp, "UM", read_wait_s=0.04)
-                if um == candidate:
-                    selected_um = candidate
-                    break
+        def worker(client: Any) -> None:
+            self._log(
+                f"Auto Spin Verify: transport={self.cfg.get('elmo_transport')} mode={self.cfg.get('elmo_command_mode')} test_current={tc} spin_jv={jv}"
+            )
+            client.set_motor_off()
+            client.set_um(5)
+            client.set_rm(1)
+            self._log(f"MO1 => {client.set_motor_on()}")
 
-            if selected_um is None:
-                raise RuntimeError("Could not select a supported UM for autonomous spin verify.")
-
-            self._log(f"Auto Spin Verify: selected UM={selected_um}, test_current={tc}, spin_jv={jv}")
-            self._elmo_exchange(sp, "MO=1", read_wait_s=0.05)
-
-            px_before = self._query_int(sp, "PX", read_wait_s=0.03)
-            self._elmo_exchange(sp, f"TC={tc}", read_wait_s=0.0)
+            px_before = client.get_px()
+            self._log(f"TC+ => {client.set_tc(tc)}")
             time.sleep(0.35)
-            self._elmo_exchange(sp, f"TC={-tc}", read_wait_s=0.0)
+            self._log(f"TC- => {client.set_tc(-tc)}")
             time.sleep(0.35)
-            self._elmo_exchange(sp, "TC=0", read_wait_s=0.0)
+            self._log(f"TC0 => {client.set_tc(0)}")
             time.sleep(0.08)
-            px_after_torque = self._query_int(sp, "PX", read_wait_s=0.03)
+            px_after_torque = client.get_px()
             torque_delta = None if px_before is None or px_after_torque is None else abs(px_after_torque - px_before)
             self._log(f"Auto Spin Verify torque pulse: px_before={px_before} px_after={px_after_torque} delta={torque_delta}")
 
-            px_before_spin = self._query_int(sp, "PX", read_wait_s=0.03)
-            self._elmo_exchange(sp, f"JV={jv}", read_wait_s=0.03)
-            self._elmo_exchange(sp, "BG", read_wait_s=0.03)
-            time.sleep(2.0)
-            px_mid = self._query_int(sp, "PX", read_wait_s=0.03)
-            self._elmo_exchange(sp, "ST", read_wait_s=0.03)
-            self._elmo_exchange(sp, "JV=0", read_wait_s=0.03)
-            self._elmo_exchange(sp, "BG", read_wait_s=0.03)
-            time.sleep(0.15)
-            px_after_spin = self._query_int(sp, "PX", read_wait_s=0.03)
+            px_before_spin = client.get_px()
+            self._log(f"PR quarter-rev => {client.set_pr(int(abs(jv) * 10))}")
+            self._log(f"BG => {client.begin_motion()}")
+            px0, px_mid, _delta = self._wait_until_stable_client(client, expected_abs_delta=max(1000, int(abs(jv) * 8)), timeout_s=2.5)
+            self._log(f"ST => {client.stop_motion()}")
+            px_after_spin = client.get_px()
             spin_delta = None if px_before_spin is None or px_mid is None else abs(px_mid - px_before_spin)
             rotation_ok = bool((spin_delta is not None and spin_delta > 100) or (torque_delta is not None and torque_delta > 100))
             self._log(
                 "Auto Spin Verify result: "
-                f"px_before={px_before_spin} px_mid={px_mid} px_after={px_after_spin} spin_delta={spin_delta} rotation_ok={rotation_ok}"
+                f"px0={px0} px_before={px_before_spin} px_mid={px_mid} px_after={px_after_spin} spin_delta={spin_delta} rotation_ok={rotation_ok}"
             )
 
-        self._run_autonomous_serial_task("auto_spin_verify", worker)
+        self._run_autonomous_drive_task("auto_spin_verify", worker)
 
     def rotate_one_rev(self, direction: int) -> None:
         try:
@@ -787,28 +899,29 @@ class App:
         cmd_counts = counts_per_rev if direction >= 0 else -counts_per_rev
         name = "rotate_plus_one_rev" if direction >= 0 else "rotate_minus_one_rev"
 
-        def worker(sp: Any) -> None:
+        def worker(client: Any) -> None:
             self._log(f"{name}: starting autonomous move with cmd_counts={cmd_counts}")
-            self._elmo_exchange(sp, "ST", read_wait_s=0.04)
-            self._elmo_exchange(sp, "TC=0", read_wait_s=0.02)
-            self._elmo_exchange(sp, "MO=0", read_wait_s=0.04)
-            self._elmo_exchange(sp, "UM=5", read_wait_s=0.05)
-            self._elmo_exchange(sp, "RM=1", read_wait_s=0.05)
-            self._elmo_exchange(sp, "MO=1", read_wait_s=0.05)
+            self._log(f"ST => {client.stop_motion()}")
+            self._log(f"TC0 => {client.set_tc(0)}")
+            self._log(f"MO0 => {client.set_motor_off()}")
+            self._log(f"UM => {client.set_um(5)}")
+            self._log(f"RM => {client.set_rm(1)}")
+            self._log(f"MO1 => {client.set_motor_on()}")
 
-            mo = self._query_int(sp, "MO", read_wait_s=0.04)
-            um = self._query_int(sp, "UM", read_wait_s=0.04)
+            mo = client.get_mo()
+            details = client.describe()
+            um = details.get("mode_display")
             self._log(f"{name}: drive state MO={mo} UM={um}")
 
-            self._elmo_exchange(sp, f"PR={cmd_counts}", read_wait_s=0.01)
-            self._elmo_exchange(sp, "BG", read_wait_s=0.01)
-            px0, px1, delta = self._wait_until_stable(sp, expected_abs_delta=counts_per_rev)
+            self._log(f"PR => {client.set_pr(cmd_counts)}")
+            self._log(f"BG => {client.begin_motion()}")
+            px0, px1, delta = self._wait_until_stable_client(client, expected_abs_delta=counts_per_rev)
             ok = (delta is not None) and (abs(abs(delta) - counts_per_rev) <= int(counts_per_rev * 0.15))
             self._log(
                 f"{name}: px0={px0} px1={px1} delta={delta} target={counts_per_rev} ok={ok}"
             )
 
-        self._run_autonomous_serial_task(name, worker)
+        self._run_autonomous_drive_task(name, worker)
 
     def stop_managed(self, release_after_stop: bool = True) -> None:
         stopped = False

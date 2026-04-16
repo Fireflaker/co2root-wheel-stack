@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("inject", "http", "serial", "websocket")]
+    [ValidateSet("inject", "http", "serial", "websocket", "vjoy_ffb")]
     [string]$Source = "websocket",
     [switch]$SkipPortPreflight,
     [switch]$SkipPortConflictCleanup,
@@ -8,6 +8,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+function Test-IsAdmin {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
 function Test-MasterGuiRunning {
     $name = "Global\Co2Root_MasterControlGUI"
@@ -120,6 +126,11 @@ $config = Get-Content $configPath -Raw | ConvertFrom-Json
 $config.sim_source = $Source
 $config | ConvertTo-Json -Depth 6 | Set-Content $configPath -Encoding ascii
 
+if (($config.elmo_transport -eq 'ethercat') -and -not (Test-IsAdmin)) {
+    Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Source', $Source, '-BypassMasterWarning')
+    exit 0
+}
+
 $elmoPort = [string]$config.elmo_port
 $elmoBaud = [int]$config.elmo_baud
 
@@ -146,5 +157,5 @@ if (-not $SkipPortPreflight) {
     }
 }
 
-Write-Host "Starting adapter with source: $Source (elmo_port=$elmoPort)"
+Write-Host "Starting adapter with source: $Source (transport=$($config.elmo_transport) elmo_port=$elmoPort)"
 python "$PSScriptRoot/adapter_main.py"

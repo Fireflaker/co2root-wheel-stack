@@ -1,6 +1,12 @@
 {
+    "elmo_transport": "ethercat",
     "elmo_port": "COM13",
     "elmo_baud": 115200,
+    "ethercat_adapter_match": "Realtek Gaming USB 2.5GbE Family Controller",
+    "ethercat_slave_index": 1,
+    "ethercat_profile_velocity": 120000,
+    "ethercat_profile_acceleration": 250000,
+    "ethercat_profile_deceleration": 250000,
     "sim_source": "vjoy_ffb",
     "sim_serial_port": "COM11",
     "sim_serial_baud": 115200,
